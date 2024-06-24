@@ -1,0 +1,93 @@
+TuplS 结构
+
+包含六个整数字段，用于存储生成矩阵的行列信息：
+
+• d, a, b, d1, a1, b1
+
+Element 结构
+
+包含一个 unsigned char 类型的值 val 和一些条件编译下的整数字段（用于稀疏矩阵）
+
+• val: 符号值。
+• rprev, rnext, cprev, cnext: 用于稀疏矩阵行和列的指针。
+
+Degree 结构
+
+包含三个整数字段：
+
+• ori: 原始度数。
+• curr: 当前度数。
+• gtone: 度数大于1的数量。
+
+Generators 类
+
+Generators 类是核心部分，包含编码和解码的逻辑：
+
+• 构造函数和析构函数
+• 初始化和生成函数
+	• gen(), _0_init(), _1_Tuples(), _2_Matrix_GLDPC(), _3_Matrix_GHDPC(), _4_Matrix_GLT()
+
+• 数据准备和处理函数
+	• prepare()
+• 交换和XOR操作函数
+	• swap_row(), swap_col(), xxor()
+• 矩阵操作函数
+	• gaussian_elimination()
+• 编码和解码函数
+	• generate_intermediates(), generate_repairs(), recover_symbol()
+• 输出和调试函数
+	• verify(), PrintMatrix(), ToString()
+
+源文件部分 (.cpp 文件)
+
+gen()
+
+• 初始化并创建不同的矩阵（GLDPC, GHDPC, GLT）。
+
+初始化和分配资源
+
+• _0_init(): 根据传入的参数 _K, _N, _T 初始化一些重要变量，如 K, N, T, 计算并分配其他辅助资源（如符号表 C1, C, 修复符号 R, 生成矩阵 A 和其备份 Abak 等）。
+
+矩阵生成
+
+• _2_Matrix_GLDPC(): 生成 GLDPC 矩阵部分，用于处理低密度奇偶校验码。
+• _3_Matrix_GHDPC(): 生成 GHDPC 矩阵部分，用于处理高密度奇偶校验码。
+• _4_Matrix_GLT(): 生成 GLT 矩阵部分，用于处理 LT 编码。
+
+在 _4_Matrix_GLT() 函数中，生成了GLT（Luby Transform）的矩阵部分。这一部分确定了编码过程中每个符号对应的源符号的组合关系。矩阵的每一行表示某个编码符号是由哪些源符号通过XOR操作生成的。
+LTEnc() 函数是进行实际编码的地方。它执行了矩阵相乘的操作，根据生成的Tuples值，对中间符号进行XOR操作，生成编码符号.
+生成矩阵内的元素是用伪随机数确定的
+
+
+
+生成和处理符号的数据准备
+
+• prepare(): 为编码器或解码器准备数据，清理上次运行的遗留数据，填充新的源数据块。
+
+行列交换和异或操作
+
+• swap_row(): 交换矩阵的两行。
+• swap_col(): 交换矩阵的两列。
+• xxor(): 将矩阵的一行与另一行异或。
+
+矩阵求逆和高斯消去法
+
+• gaussian_elimination(): 对矩阵进行高斯消去，进行编码或解码算法的核心步骤。
+
+编码和解码过程
+
+• generate_intermediates(): 生成中间符号，用于解码时的中间步骤。
+• generate_repairs(): 生成修复符号，允许生成额外的修复数据以应对丢包或数据损坏的情况。
+• recover_symbol(): 从中间符号恢复出源符号。
+
+辅助函数
+
+• RandYim(), Deg(), Tupl(): 用于生成特定元素的随机数计算和度数计算。
+确保了生成矩阵内的元素是用伪随机数确定的
+调试输出
+
+• verify(), PrintMatrix(), ToString(): 用于打印出矩阵和内部状态，便于调试和验证。
+
+常量乘除运算
+
+• octmul(), octdiv(): Galois 域上的乘法和除法操作。
