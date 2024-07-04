@@ -30,17 +30,19 @@ int** initSFM(int revers_num, int K) {
 //生成SFM矩阵
 void formSFM(int** SFM, Receiver* receivers, int n) {
     for(int i=0; i<n; i++) {
-        for(int j=0; j<receivers[i].rev_status.size; j++) {
-            SFM[i][j] = receivers[i].rev_status.arr[j];
+        if (rand()/(RAND_MAX + 1.0) > 0.1) {
+            for(int j=0; j<receivers[i].rev_status.size; j++) {
+                    SFM[i][j] = receivers[i].rev_status.arr[j];
+            }
         }
     }
 }
 
 int main() {
-    printf("Hello, World!\n");
+    int roundCount = 1;
     int i,j,K,T;
     double lossrate;
-    K = 20;
+    K = 10;
     T = 4;
     lossrate = 0.3;
     int** SFM; //全局变量
@@ -52,13 +54,7 @@ int main() {
             source[i][j] = (char)(j + '0');
         }
     }
-    for (i=0; i<K; i++)
-    {
-        for (j=0; j<T; j++) {
-            printf("%c ", source[i][j]);
-        }
-    }
-    printf("\n");
+
 
     // 初始化Sender结构体
     Sender*  sender = initSender((char**)source, K, T);
@@ -70,7 +66,7 @@ int main() {
     }
 
     //构造receiver
-    int num_rsver=10; //接收者个数
+    int num_rsver=4; //接收者个数
     Receiver  *rcvers = (Receiver*) malloc(sizeof(Receiver) * num_rsver);
     for(i=0; i<num_rsver; i++) {
         rcvers[i] = initReceiver(rcvers[i], K);
@@ -107,7 +103,7 @@ int main() {
     //初始化SFM, K为包个数
     SFM = initSFM(num_rsver, K);
     formSFM(SFM,rcvers, num_rsver);
-    printf("SFM matrix is:\n");
+    printf("Round %d SFM matrix is:\n", roundCount);
     for(i=0; i<num_rsver; i++) {
         for(j=0; j<K; j++) {
             printf("%d ", SFM[i][j]);
@@ -152,6 +148,14 @@ int main() {
 
         // 重新生成SFM矩阵
         formSFM(SFM,rcvers, num_rsver);
+        roundCount++;
+        printf("Round %d SFM matrix is:\n", roundCount);
+        for(i=0; i<num_rsver; i++) {
+            for(j=0; j<K; j++) {
+                printf("%d ", SFM[i][j]);
+            }
+            printf("\n");
+        }
     }
 
     printf("end");
