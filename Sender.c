@@ -1,69 +1,77 @@
 #include "Sender.h"
 
-//函数会把string类型的包封装成Symbol类型，然如存入Packets容器中
-Sender*  initSender(char **source, int K, int T) {
-    int n = K; //包个数
-    Sender* sender = (Sender*)malloc(sizeof (Sender));
-    sender->packets.symbols = (Symbol**)malloc(sizeof (Symbol*) * n); // sender->packets为Symbol的vector
-    sender->packets.size = n;
-    for(int i=0; i<n; i++) {
-        char* str = (char*)source[i]; //获取包
-        //printf("%s ", str);
-        sender->packets.symbols[i];
-        Symbol* sym = (Symbol*)malloc(sizeof(Symbol)); // 将包封装到sym中
+// 创建原始包
+VectorSymbol createPackets(char **source, int K, int T) {
+    VectorSymbol packets;
+    packets.symbols = (Symbol**)malloc(sizeof(Symbol*) * K);
+    packets.size = K;
+    for(int i=0; i<K; i++) {
+        char* str = (char*)source[i];
+        Symbol* sym = (Symbol*)malloc(sizeof(Symbol));
         fillData(sym, str, T);
         sym->esi.arr = (int*)malloc(sizeof(int));
         sym->esi.arr[0] = i;
         sym->esi.size = 1;
-        sym->isCoded = 0; //原始包
+        sym->isCoded = 0;
         sym->nbytes = T;
-        sender->packets.symbols[i] = sym; //将封装进symbol的包放入容器
+        packets.symbols[i] = sym;
     }
-    return sender;
+    return packets;
 }
-
+/**
+ * encode - 实现编码包的生成
+ * Input: 分区结果和原始包
+ * Output: 编码后的包
+ */
 VectorSymbol encode(partition_result part_res, Symbol** Packets) {
-    printf("\nenter Encoder::encode()\n");
     int row = part_res.solution_count;
     VectorSymbol vs = newVectorSymbol(row);
-    printf("pair_matrix.size()=%d\n",row);
+    
+    // 对每个团生成编码包
     for(int i=0; i<row; i++) {
         int col = part_res.solution_sizes[i];
-        //cout<<i<<", nbytes="<<Packets[i]->nbytes<<endl;
-        int id1,id2;
-        id1 = part_res.solution[i][0];
-        Symbol* encoded_sym = NULL; // 编码后的symbol
+        int id1 = part_res.solution[i][0];
+        Symbol* encoded_sym = NULL;
+        
+        // if K = {vk}，直接使用原始包
         if (col == 1) {
             encoded_sym = Packets[id1];
-            encoded_sym->esi = newEsi(encoded_sym->esi, 1);
+            encoded_sym->esi = newEsi(1);
             encoded_sym->esi.arr[0] = id1;
             encoded_sym->isCoded = 0;
-            printf("row%d %d\n",i,encoded_sym -> esi.arr[0]);
-        } else if (col > 1) {
-            id2 = part_res.solution[i][1];
+        } 
+        // if K = {vk,vk'}，生成异或编码包
+        else if (col > 1) {
+            int id2 = part_res.solution[i][1];
             encoded_sym = xxor(Packets[id1], Packets[id2]);
-            encoded_sym->esi = newEsi(encoded_sym->esi, 2);
-            encoded_sym -> esi.arr[0] = id1;
-            encoded_sym -> esi.arr[1] = id2;
-            encoded_sym->isCoded = 1; //编码标识置位
-            printf("row%d %d, %d\n",i,encoded_sym -> esi.arr[0],encoded_sym -> esi.arr[1]);
+            encoded_sym->esi = newEsi(2);
+            encoded_sym->esi.arr[0] = id1;
+            encoded_sym->esi.arr[1] = id2;
+            encoded_sym->isCoded = 1;
         }
-        //todo: 考虑limit大于2的情况
         vs.symbols[i] = encoded_sym;
     }
-    return  vs;
+    return vs;
 }
 
-bool isSFMAll0(int** sfm, int row, int col) {
-    for(int i=0; i<row; i++) {
-        for(int j=0; j<col; j++) {
-            if(sfm[i][j] != 0) {
-                return false;
-            }
+/**
+ * isSFMAllzero - 检查SFM矩阵是否全为0
+ * @param sfm: 状态反馈矩阵(SFM)
+ * @param row: 接收者数量 N
+ * @param col: 包的总数 K
+ * @return: 如果SFM矩阵全为0，返回true，否则返回false
+ */
+bool isSFMAllzero(int** sfm, int row, int col) {
+    for (int i = 0; i < row; i++) {
+        // 使用memcmp比较一整行
+        static const int zeros[32] = {0};  // 假设col最大为32
+        if (memcmp(sfm[i], zeros, col * sizeof(int)) != 0) {
+            return false;
         }
     }
     return true;
 }
+
 
 bool findElement(int** arr, int rows, int cols, int value) {
     for (int i = 0; i < rows; ++i) {
@@ -76,82 +84,76 @@ bool findElement(int** arr, int rows, int cols, int value) {
     return false;
 }
 
-// 辅助函数：构建集合 C 和 U
-int_pair GetSet(int** sfm, int rows, int cols, int* lost_packets, int lost_size, int packet_current) {
-    int* c_set = (int*)malloc(lost_size * sizeof(int));
-    int* u_set = (int*)malloc(lost_size * sizeof(int));
-    int c_set_size = 0;
-    int u_set_size = 0;
-    int* diff_set = (int*)malloc(lost_size * sizeof(int));
-    int diff_set_size = 0;
+/**
+ * CalculateDegree - 计算顶点的度数（degree）
+ * 
+ * 在S-IDNC图中，顶点 vk 的权重计算公式为：
+ * wk = |Tk| / δk
+ * 其中：
+ * - |Tk| 是需要包k的接收者集合的大小（在代码中对应 P_bewant[i]）
+ * - δk 是顶点 vk 的度数，即与其相连的边的数量（该函数的返回值）
+ * 
+ * @param sfm: 状态反馈矩阵(SFM)
+ * @param rows: 接收者数量 N
+ * @param cols: 包的总数 K
+ * @param lost_packets: 丢失的包的集合 V
+ * @param packet_current: 当前顶点对应的包 pk
+ * 
+ * @return: 顶点的度数 δk
+ */
+int CalculateDegree(int** sfm, int rows, int cols, VectorInt lost_packets, int packet_current) {
+    int degree = 0;
 
-    for (int i = 0; i < lost_size; ++i) {
-        if (lost_packets[i] != packet_current) {
-            diff_set[diff_set_size++] = lost_packets[i];
-        }
-    }
+    for (int i = 0; i < lost_packets.size; ++i) {
+        if (lost_packets.arr[i] == packet_current) continue; // 跳过当前包
 
-    for (int i = 0; i < diff_set_size; ++i) {
-        int* temp = (int*)malloc(rows * sizeof(int));
         for (int j = 0; j < rows; ++j) {
-            temp[j] = sfm[j][packet_current] + sfm[j][diff_set[i]];
-        }
-
-        bool result = false;
-        for (int k = 0; k < rows; ++k) {
-            if (temp[k] > 1) {
-                result = true;
+            if (sfm[j][packet_current] + sfm[j][lost_packets.arr[i]] > 1) {
+                degree++; //找到一条边
                 break;
             }
         }
-        if (result) {
-            c_set[c_set_size++] = diff_set[i];
-        } else {
-            u_set[u_set_size++] = diff_set[i];
-        }
-        free(temp);
     }
 
-    free(diff_set);
-
-    int_pair res;
-    res.first = c_set;
-    res.first_size = c_set_size;
-    res.second = u_set;
-    res.second_size = u_set_size;
-
-    return res;
+    return degree;
 }
 
-// 获得 Clique 集合
-int* getClique(int** sfm, int rows, int cols, int limit, int* result_size) {
-    int* V_keep = (int*)malloc(cols * sizeof(int));
-    int V_keep_size = 0;
+/**
+ * getClique - 实现算法1：在图中寻找包含最多两个顶点的团
+ * Input: Graph (V, E) - 通过 sfm 矩阵表示
+ * Output: Clique K - 通过 VectorInt 返回
+ */
+VectorInt getClique(int** sfm, int rows, int cols, int limit) {
+    // Initialization: K = ∅
+    VectorInt V_keep;
+    V_keep.arr = (int*)malloc(cols * sizeof(int));
+    V_keep.size = 0;
+    
+    // 创建sfm的副本用于计算
     int** sfmAlter = (int**)malloc(rows * sizeof(int*));
     for (int i = 0; i < rows; ++i) {
         sfmAlter[i] = (int*)malloc(cols * sizeof(int));
-        for (int j = 0; j < cols; ++j) {
-            sfmAlter[i][j] = sfm[i][j];
-        }
+        memcpy(sfmAlter[i], sfm[i], cols * sizeof(int));
     }
 
     while (findElement(sfmAlter, rows, cols, 1)) {
-        if (V_keep_size >= limit)
-            break;
+        if (V_keep.size >= limit) break;
 
-        int* weights = (int*)malloc(cols * sizeof(double));
+        // Step 1: ∀vk ∈ V, compute wk using (52)
+        int* weights = (int*)malloc(cols * sizeof(int));
         int* sfmAlter_sum = (int*)calloc(cols, sizeof(int));
+        // 计算每列和作为权重的一部分
         for (int i = 0; i < rows; ++i) {
             for (int j = 0; j < cols; ++j) {
                 sfmAlter_sum[j] += sfmAlter[i][j];
             }
         }
 
+        // 构建顶点集 V
         int* P_bewant = (int*)malloc(cols * sizeof(int));
         int* LostPacket = (int*)malloc(cols * sizeof(int));
         int P_bewant_size = 0;
         int LostPacket_size = 0;
-
         for (int i = 0; i < cols; ++i) {
             if (sfmAlter_sum[i] != 0) {
                 P_bewant[P_bewant_size++] = sfmAlter_sum[i];
@@ -159,19 +161,18 @@ int* getClique(int** sfm, int rows, int cols, int limit, int* result_size) {
             }
         }
 
-        //去除浮点运算
+        // 计算每个顶点的权重
+        VectorInt lostPacketVec;
+        lostPacketVec.arr = LostPacket;
+        lostPacketVec.size = LostPacket_size;
         for (int i = 0; i < LostPacket_size; ++i) {
-            int_pair res = GetSet(sfmAlter, rows, cols, LostPacket, LostPacket_size, LostPacket[i]);
-            if (res.second_size == 0) {
-                weights[i] = P_bewant[i] * 1000;
-            } else {
-                int degree = res.second_size;
-                weights[i] = P_bewant[i] / degree;
-            }
-            free(res.first);
-            free(res.second);
+            int degree = CalculateDegree(sfmAlter, rows, cols, lostPacketVec, LostPacket[i]);
+            weights[i] = degree == 0 ? 
+                         P_bewant[i] * 1000 :  // 如果度数为0，给予高权重
+                         P_bewant[i] / degree;  // 否则按公式计算权重
         }
 
+        // Step 2: Select vk = argmax{wk}
         int max_idx = 0;
         int max_weight = weights[0];
         for (int i = 0; i < LostPacket_size; i++) {
@@ -180,145 +181,126 @@ int* getClique(int** sfm, int rows, int cols, int limit, int* result_size) {
                 max_idx = i;
             }
         }
-        free(weights);
 
+        // Step 3: Set K = {vk}
         int V_maxWeight = LostPacket[max_idx];
-        V_keep[V_keep_size++] = V_maxWeight;
+        V_keep.arr[V_keep.size++] = V_maxWeight;
 
-        int_pair sets = GetSet(sfmAlter, rows, cols, LostPacket, LostPacket_size, V_maxWeight);
-        int* c_set = sets.first;
-        int c_set_size = sets.first_size;
-
-        printf("V_maxWeight = %d\n", V_maxWeight);
-        printf("c_set = ");
-        for (int i = 0; i < c_set_size; ++i) {
-            printf("%d,", c_set[i]);
-        }
-        printf("\n");
-
+        // Step 4: Set V' = {vk': (vk,vk') ∈ E}
+        int degree = CalculateDegree(sfmAlter, rows, cols, lostPacketVec, V_maxWeight);
+        
+        // Step 5-6: Remove vk from V
         for (int i = 0; i < rows; ++i) {
             sfmAlter[i][V_maxWeight] = 0;
         }
+
+        // 移除相邻边
         for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < c_set_size; ++j) {
-                sfmAlter[i][c_set[j]] = 0;
+            for (int j = 0; j < degree; ++j) {
+                sfmAlter[i][LostPacket[j]] = 0;
             }
         }
-        free(c_set);
+
+        // 清理内存
+        free(weights);
         free(P_bewant);
         free(LostPacket);
         free(sfmAlter_sum);
-
     }
 
-    printf("V_keep = ");
-    for (int i = 0; i < V_keep_size; ++i) {
-        printf("%d,", V_keep[i]);
-    }
-    printf("\n");
-
+    // 清理内存
     for (int i = 0; i < rows; ++i) {
         free(sfmAlter[i]);
     }
     free(sfmAlter);
 
-    *result_size = V_keep_size;
-    return V_keep;
+    return V_keep;  // 返回找到的团 K
 }
 
-
+/**
+ * func_limit_partition - 实现算法2：构造S-IDNC解决方案
+ * Input: Graph (V, E) - 通过 sfm 矩阵表示
+ * Output: S-IDNC solution Pr
+ *   @param sfm: 状态反馈矩阵
+ * @param rows: 接收者数量
+ * @param cols: 包的总数
+ * @param limit: 团的最大顶点数限制（通常为2）
+ */
 partition_result func_limit_partition(int** sfm, int rows, int cols, int limit) {
     partition_result res;
+    
+    // 计算最大可能的解决方案数量：每个解最多包含2个顶点，所以最大数量为 cols/2 向上取整
+    int max_solutions = cols / 2 + 1;  
+    // 为解决方案数组分配内存
+    int** Solution = (int**)malloc(max_solutions * sizeof(int*));
+    int* Solution_sizes = (int*)malloc(max_solutions * sizeof(int));
+    int Solution_count = 0;  // 当前解决方案数量
 
-    int* V = (int*)malloc(cols * sizeof(int));
-    int V_size = 0;
+    // 创建状态反馈矩阵(SFM)的工作副本
+    int** sfm_w = (int**)malloc(rows * sizeof(int*));
+    for (int i = 0; i < rows; ++i) {
+        sfm_w[i] = (int*)malloc(cols * sizeof(int));
+        memcpy(sfm_w[i], sfm[i], cols * sizeof(int));  // 复制原始SFM
+    }
 
+    // 初始化顶点状态跟踪数组：0表示已处理，1表示待处理
+    int* vertex_status = (int*)calloc(cols, sizeof(int));
+    int remaining_vertices = 0;  // 剩余待处理的顶点数
+    // 统计需要处理的顶点数量
     for (int j = 0; j < cols; ++j) {
         for (int i = 0; i < rows; ++i) {
-            if (sfm[i][j] > 0) {
-                V[V_size++] = j;
+            if (sfm[i][j] > 0) {  // 如果有接收者需要这个包
+                vertex_status[j] = 1;  // 标记为待处理
+                remaining_vertices++;
                 break;
             }
         }
     }
 
-    printf("V arr is: \n");
-    for (int i = 0; i < V_size; ++i) {
-        printf("%d,", V[i]);
-    }
-    printf("\n");
-
-    int** sfm_w = (int**)malloc(rows * sizeof(int*));
-    for (int i = 0; i < rows; ++i) {
-        sfm_w[i] = (int*)malloc(cols * sizeof(int));
-        for (int j = 0; j < cols; ++j) {
-            sfm_w[i][j] = sfm[i][j];
-        }
-    }
-
-    int cd = 0;
-    int** Solution = (int**)malloc(cols * sizeof(int*));
-    int* Solution_sizes = (int*)malloc(cols * sizeof(int));
-    int Solution_count = 0;
-
-    while (V_size > 0) {
-        int V_keep_size;
-        int* V_keep = getClique(sfm_w, rows, cols, limit, &V_keep_size);
-
-        for (int i = 0; i < rows; ++i) {
-            for (int j = 0; j < V_keep_size; ++j) {
-                sfm_w[i][V_keep[j]] = 0;
-            }
-        }
-
-        int* temp = (int*)malloc(cols * sizeof(int));
-        int temp_size = 0;
-
-        for (int j = 0; j < V_size; ++j) {
-            bool found = false;
-            for (int k = 0; k < V_keep_size; ++k) {
-                if (V[j] == V_keep[k]) {
-                    found = true;
-                    break;
+    // 主循环：持续处理直到所有顶点都被处理
+    while (remaining_vertices > 0) {
+        // 使用getClique找到一个最多包含limit个顶点的团
+        VectorInt clique = getClique(sfm_w, rows, cols, limit);
+        
+        if (clique.size > 0) {  // 如果找到了有效的团
+            // 保存这个团到解决方案数组
+            Solution[Solution_count] = (int*)malloc(clique.size * sizeof(int));
+            memcpy(Solution[Solution_count], clique.arr, clique.size * sizeof(int));
+            Solution_sizes[Solution_count] = clique.size;
+            
+            // 更新顶点状态：将团中的顶点标记为已处理
+            for (int i = 0; i < clique.size; ++i) {
+                int v = clique.arr[i];
+                if (vertex_status[v]) {  // 如果顶点之前未处理
+                    vertex_status[v] = 0;  // 标记为已处理
+                    remaining_vertices--;  // 更新剩余顶点计数
                 }
             }
-            if (!found) {
-                temp[temp_size++] = V[j];
+            
+            // 在SFM工作副本中移除已处理的顶点
+            for (int i = 0; i < rows; ++i) {
+                for (int j = 0; j < clique.size; ++j) {
+                    sfm_w[i][clique.arr[j]] = 0;
+                }
             }
+            
+            Solution_count++;  // 增加解决方案计数
         }
-
-        free(V);
-        V = temp;
-        V_size = temp_size;
-
-        ++cd;
-        if (V_keep_size > 0) {
-            // 冒泡，可以替换成堆排序或者快速排序
-//            for (int i = 0; i < V_keep_size - 1; ++i) {
-//                for (int j = 0; j < V_keep_size - i - 1; ++j) {
-//                    if (V_keep[j] > V_keep[j + 1]) {
-//                        int t = V_keep[j];
-//                        V_keep[j] = V_keep[j + 1];
-//                        V_keep[j + 1] = t;
-//                    }
-//                }
-//            }
-            Solution[Solution_count] = V_keep;
-            Solution_sizes[Solution_count] = V_keep_size;
-            ++Solution_count;
-        }
+        
+        free(clique.arr);  // 释放临时团数组
     }
 
-    res.cd = cd;
+    // 设置结果
     res.solution = Solution;
     res.solution_sizes = Solution_sizes;
     res.solution_count = Solution_count;
 
+    // 清理临时内存
+    free(vertex_status);
     for (int i = 0; i < rows; ++i) {
         free(sfm_w[i]);
     }
     free(sfm_w);
-    free(V);
 
     return res;
 }

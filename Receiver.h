@@ -14,7 +14,7 @@ typedef struct {
     int pkt_recv; //收到包的个数
 }Receiver;
 
-Receiver initReceiver(Receiver receiver, int K);
-void receiveSymbol(Receiver *receiver, Symbol* sym);
+Receiver initReceiver(int K);
+Receiver receiveSymbol(Receiver receiver, const Symbol* sym);
 
 #endif //IDNC_C_RECEIVER_H

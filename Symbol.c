@@ -1,6 +1,7 @@
 #include "Symbol.h"
 
-Esi newEsi(Esi esi, int size) {
+Esi newEsi(int size) {
+    Esi esi;
     esi.arr = (int*)malloc(size * sizeof(int));
     esi.size = size;
     return esi;
@@ -13,7 +14,7 @@ VectorSymbol newVectorSymbol(int size) {
     return vs;
 }
 
-void fillData(Symbol* sym, char *src, int size)
+void fillData(Symbol* sym, const char *src, int size)
 {
     if(sym == NULL) return;
     if (sym->nbytes != size) {
@@ -22,7 +23,7 @@ void fillData(Symbol* sym, char *src, int size)
     memcpy(sym->data, src, size);
 }
 
-Symbol* xxor(Symbol *s1, Symbol *s2)
+Symbol* xxor(const Symbol* s1, const Symbol* s2)
 {
     if (s1 == NULL || s2 == NULL) return NULL;
 

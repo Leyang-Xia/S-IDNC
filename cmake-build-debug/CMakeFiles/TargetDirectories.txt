@@ -1,0 +1,3 @@
+D:/IDNC/S-IDNC/cmake-build-debug/CMakeFiles/S_IDNC.dir
+D:/IDNC/S-IDNC/cmake-build-debug/CMakeFiles/edit_cache.dir
+D:/IDNC/S-IDNC/cmake-build-debug/CMakeFiles/rebuild_cache.dir

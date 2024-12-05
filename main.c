@@ -42,7 +42,7 @@ int main() {
     int roundCount = 1;
     int i,j,K,T;
     double lossrate;
-    K = 10;
+    K = 32;
     T = 4;
     lossrate = 0.3;
     int** SFM; //全局变量
@@ -55,13 +55,12 @@ int main() {
         }
     }
 
-
     // 初始化Sender结构体
-    Sender*  sender = initSender((char**)source, K, T);
-    int pkt_num = sender->packets.size;
+    VectorSymbol packets = createPackets((char**)source, K, T);
+    int pkt_num = packets.size;
     printf("source symbol is :\n");
     for(i=0; i<pkt_num; i++) {
-        Symbol* sym = sender->packets.symbols[i];
+        Symbol* sym = packets.symbols[i];
         printSymbol(sym);
     }
 
@@ -69,7 +68,7 @@ int main() {
     int num_rsver=4; //接收者个数
     Receiver  *rcvers = (Receiver*) malloc(sizeof(Receiver) * num_rsver);
     for(i=0; i<num_rsver; i++) {
-        rcvers[i] = initReceiver(rcvers[i], K);
+        rcvers[i] = initReceiver(K);
     }
 
     //发送原始包，生成SFM矩阵
@@ -77,9 +76,7 @@ int main() {
     for (i=0; i< K; i++) { //逐包发给每个接收者
         for(j=0; j<num_rsver; j++) {
             if (rand()/(RAND_MAX + 1.0) > lossrate) {
-                // 因为sender构造函数已经初始化了K个Symbol包对象，这里可以直接拿出来用
-                // 记录收包的状态，收到原始包数统计，移到Receiver::receiveSymbol()函数实现
-                receiveSymbol(&rcvers[j], sender->packets.symbols[i]);
+                rcvers[j] = receiveSymbol(rcvers[j], packets.symbols[i]);
             }
         }
     }
@@ -111,13 +108,13 @@ int main() {
         printf("\n");
     }
 
-    while(!isSFMAll0(SFM, num_rsver, K)) {
+    while(!isSFMAllzero(SFM, num_rsver, K)) {
         //clique算法进行包配对
         int limit = 2;
         partition_result pairs = func_limit_partition(SFM, num_rsver, K, limit);
 
         //生成编码包列表
-        VectorSymbol symbolVec = encode(pairs, sender->packets.symbols);
+        VectorSymbol symbolVec = encode(pairs, packets.symbols);
         printf("print encoded pkts:\n");
         for(i=0; i<symbolVec.size; i++) {
             printSymbol(symbolVec.symbols[i]);
@@ -128,9 +125,7 @@ int main() {
         for (i=0; i< symbolVec.size; i++) { //逐包发给每个接收者
             for(j=0; j<num_rsver; j++) {
                 if (rand()/(RAND_MAX + 1.0) > lossrate) {
-                    // 记录收包的状态，收到原始包数统计，在receiveSymbol()函数实现
-                    // 解码出来的包，会记录到对应receiver的结构体中
-                    receiveSymbol(&rcvers[j], symbolVec.symbols[i]);
+                    rcvers[j] = receiveSymbol(rcvers[j], symbolVec.symbols[i]);
                 }
             }
         }
