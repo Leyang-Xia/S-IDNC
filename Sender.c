@@ -73,12 +73,12 @@ bool isSFMAllzero(int** sfm, int row, int col) {
 }
 
 
-bool findElement(int** arr, int rows, int cols, int value) {
-    for (int i = 0; i < rows; ++i) {
-        for (int j = 0; j < cols; j++) {
-            if (arr[i][j] == value) {
-                return true;
-            }
+bool findones(int** sfm, int row, int col) {
+    for (int i = 0; i < row; i++) {
+        // 使用memcmp比较一整行
+        static const int zeros[32] = {0};  // 假设col最大为32
+        if (memcmp(sfm[i], zeros, col * sizeof(int)) != 0) {
+            return true;
         }
     }
     return false;
@@ -136,7 +136,7 @@ VectorInt getClique(int** sfm, int rows, int cols, int limit) {
         memcpy(sfmAlter[i], sfm[i], cols * sizeof(int));
     }
 
-    while (findElement(sfmAlter, rows, cols, 1)) {
+    while (findones(sfmAlter, rows, cols)) {
         if (V_keep.size >= limit) break;
 
         // Step 1: ∀vk ∈ V, compute wk using (52)
