@@ -45,7 +45,10 @@ void update_sfm() {
     }
 }
 
-// 检查SFM是否全为0
+/**
+ * is_sfm_all_zero - 检查SFM矩阵是否全为0
+ * @return: 如果SFM矩阵全为0返回1，否则返回0
+ */
 int is_sfm_all_zero() {
     for(int i = 0; i < NUM_RECEIVERS; i++) {
         for(int j = 0; j < K; j++) {
@@ -55,79 +58,143 @@ int is_sfm_all_zero() {
     return 1;
 }
 
-// 计算包的度数（有多少接收者需要它）
-int calculate_degree(int** sfm_work, int packet_id) {
+// 辅助：检查矩阵是否存在非零元素
+static int has_nonzero(int** m, int rows, int cols) {
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            if (m[i][j] != 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * CalculateDegree - 计算顶点的度数（degree）
+ *
+ * 在S-IDNC图中，顶点 vk 的权重计算公式为：
+ * wk = |Tk| / δk
+ * 其中：
+ * - |Tk| 是需要包k的接收者集合的大小（在代码中对应列和 P_bewant[i]）
+ * - δk 是顶点 vk 的度数，即与其相连的边的数量（该函数的返回值）
+ *
+ * @param sfm: 状态反馈矩阵(SFM)
+ * @param rows: 接收者数量 N
+ * @param cols: 包的总数 K
+ * @param lost: 丢失包集合 V（列索引数组）
+ * @param lost_size: 丢失包集合大小
+ * @param packet_current: 当前顶点对应的包 pk
+ *
+ * @return: 顶点的度数 δk
+ */
+static int calculate_degree_sender(int** sfm, int rows, int cols, int* lost, int lost_size, int packet_current) {
     int degree = 0;
-    for(int i = 0; i < NUM_RECEIVERS; i++) {
-        if(sfm_work[i][packet_id] > 0) degree++;
+    for (int i = 0; i < lost_size; ++i) {
+        int other = lost[i];
+        if (other == packet_current) continue;
+        for (int r = 0; r < rows; ++r) {
+            if (sfm[r][packet_current] + sfm[r][other] > 1) {
+                degree++;
+                break;
+            }
+        }
     }
     return degree;
 }
-
-// 核心算法：getClique - 查找最大权重的团
+/**
+ * get_clique - 实现算法1：在图中寻找包含最多两个顶点的团
+ * Input: Graph (V, E) - 通过 sfm 矩阵表示
+ * Output: Clique K - 通过 Clique 结构体返回
+ */
 Clique get_clique(int** sfm_work) {
     Clique result = {NULL, 0};
-    
-    // 找到所有丢失的包
-    int lost_packets[K];
-    int lost_count = 0;
-    
-    for(int j = 0; j < K; j++) {
-        for(int i = 0; i < NUM_RECEIVERS; i++) {
-            if(sfm_work[i][j] > 0) {
-                lost_packets[lost_count++] = j;
-                break;
+
+    // 创建可变工作副本
+    int** sfmAlter = (int**)malloc(NUM_RECEIVERS * sizeof(int*));
+    for (int i = 0; i < NUM_RECEIVERS; ++i) {
+        sfmAlter[i] = (int*)malloc(K * sizeof(int));
+        memcpy(sfmAlter[i], sfm_work[i], K * sizeof(int));
+    }
+
+    int* selected = (int*)malloc(MAX_CLIQUE_SIZE * sizeof(int));
+    int selected_size = 0;
+
+    while (has_nonzero(sfmAlter, NUM_RECEIVERS, K) && selected_size < MAX_CLIQUE_SIZE) {
+        // 列和（每个包被多少接收者需要）
+        int* col_sum = (int*)calloc(K, sizeof(int));
+        for (int r = 0; r < NUM_RECEIVERS; ++r) {
+            for (int c = 0; c < K; ++c) col_sum[c] += sfmAlter[r][c];
+        }
+
+        // 构造丢失包集合
+        int* lost = (int*)malloc(K * sizeof(int));
+        int* P_bewant = (int*)malloc(K * sizeof(int));
+        int lost_size = 0;
+        for (int c = 0; c < K; ++c) {
+            if (col_sum[c] != 0) {
+                lost[lost_size] = c;
+                P_bewant[lost_size] = col_sum[c];
+                lost_size++;
             }
         }
-    }
-    
-    if(lost_count == 0) return result;
-    
-    // 计算每个包的权重
-    int* weights = (int*)malloc(lost_count * sizeof(int));
-    for(int i = 0; i < lost_count; i++) {
-        int degree = calculate_degree(sfm_work, lost_packets[i]);
-        weights[i] = (degree == 0) ? 0 : lost_count / degree;
-    }
-    
-    // 找到最大权重的包
-    int max_idx = 0;
-    for(int i = 1; i < lost_count; i++) {
-        if(weights[i] > weights[max_idx]) {
-            max_idx = i;
+
+        if (lost_size == 0) {
+            free(col_sum); free(lost); free(P_bewant);
+            break;
         }
-    }
-    
-    int selected_packet = lost_packets[max_idx];
-    
-    // 创建团：从选中的包开始
-    result.packets = (int*)malloc(MAX_CLIQUE_SIZE * sizeof(int));
-    result.packets[0] = selected_packet;
-    result.size = 1;
-    
-    // 尝试添加第二个包形成大小为2的团
-    for(int i = 0; i < lost_count && result.size < MAX_CLIQUE_SIZE; i++) {
-        if(lost_packets[i] != selected_packet) {
-            // 检查这两个包是否能形成有效的编码对
-            int can_pair = 0;
-            for(int r = 0; r < NUM_RECEIVERS; r++) {
-                if(sfm_work[r][selected_packet] > 0 && sfm_work[r][lost_packets[i]] > 0) {
-                    can_pair = 1;
-                    break;
-                }
+
+        // 计算权重并选择最大者
+        int* weights = (int*)malloc(lost_size * sizeof(int));
+        for (int i = 0; i < lost_size; ++i) {
+            int deg = calculate_degree_sender(sfmAlter, NUM_RECEIVERS, K, lost, lost_size, lost[i]);
+            weights[i] = (deg == 0) ? (P_bewant[i] * 1000) : (P_bewant[i] / deg);
+        }
+
+        int max_idx = 0, max_weight = weights[0];
+        for (int i = 1; i < lost_size; ++i) {
+            if (weights[i] >= max_weight) { max_weight = weights[i]; max_idx = i; }
+        }
+
+        int v = lost[max_idx];
+        selected[selected_size++] = v;
+
+        // 根据 Sender.c 思路，移除与 v 相邻（存在某接收者同时需要）的顶点列，再移除 v 列
+        for (int i = 0; i < lost_size; ++i) {
+            int u = lost[i];
+            if (u == v) continue;
+            int adjacent = 0;
+            for (int r = 0; r < NUM_RECEIVERS; ++r) {
+                if (sfmAlter[r][v] + sfmAlter[r][u] > 1) { adjacent = 1; break; }
             }
-            if(can_pair) {
-                result.packets[result.size++] = lost_packets[i];
-                break;
+            if (adjacent) {
+                for (int r = 0; r < NUM_RECEIVERS; ++r) sfmAlter[r][u] = 0;
             }
         }
+        for (int r = 0; r < NUM_RECEIVERS; ++r) sfmAlter[r][v] = 0;
+
+        free(weights);
+        free(col_sum);
+        free(lost);
+        free(P_bewant);
     }
-    
-    free(weights);
+
+    if (selected_size > 0) {
+        result.packets = (int*)malloc(selected_size * sizeof(int));
+        memcpy(result.packets, selected, selected_size * sizeof(int));
+        result.size = selected_size;
+    }
+
+    free(selected);
+    for (int i = 0; i < NUM_RECEIVERS; ++i) free(sfmAlter[i]);
+    free(sfmAlter);
     return result;
 }
 
-// 核心算法：func_limit_partition - S-IDNC分区算法
+/**
+ * limit_partition - 实现算法2：构造S-IDNC解决方案
+ * Input: Graph (V, E) - 通过全局 sfm 矩阵表示
+ * Output: S-IDNC solution Pr（多个团的集合，每团至多2个顶点）
+
+ */
 PartitionResult limit_partition() {
     PartitionResult result;
     result.solutions = NULL;
@@ -161,40 +228,24 @@ PartitionResult limit_partition() {
     }
     
     // 主循环：持续处理直到所有顶点都被处理
-    int main_iteration = 0;
-    int max_main_iterations = K;
-    
-    while(remaining_vertices > 0 && main_iteration < max_main_iterations && result.count < max_solutions) {
-        // 使用getClique找到团
+    while (remaining_vertices > 0 && result.count < max_solutions) {
         Clique clique = get_clique(sfm_work);
-        
-        if(clique.size == 0) break; // 没有找到有效团，退出
-        
-        // 保存团到解决方案
+        if (clique.size == 0) break;
+
         result.solutions[result.count] = (int*)malloc(clique.size * sizeof(int));
         memcpy(result.solutions[result.count], clique.packets, clique.size * sizeof(int));
         result.solution_sizes[result.count] = clique.size;
-        
-        // 更新顶点状态
-        for(int i = 0; i < clique.size; i++) {
+
+        for (int i = 0; i < clique.size; ++i) {
             int v = clique.packets[i];
-            if(vertex_status[v]) {
-                vertex_status[v] = 0;
-                remaining_vertices--;
-            }
+            if (vertex_status[v]) { vertex_status[v] = 0; remaining_vertices--; }
         }
-        
-        // 在工作副本中移除已处理的顶点
-        for(int i = 0; i < NUM_RECEIVERS; i++) {
-            for(int j = 0; j < clique.size; j++) {
-                sfm_work[i][clique.packets[j]] = 0;
-            }
+
+        for (int r = 0; r < NUM_RECEIVERS; ++r) {
+            for (int j = 0; j < clique.size; ++j) sfm_work[r][clique.packets[j]] = 0;
         }
-        
+
         result.count++;
-        main_iteration++;
-        
-        // 清理团内存
         free(clique.packets);
     }
     
@@ -221,18 +272,14 @@ void transmit_packets(PartitionResult partition) {
                     // 原始包
                     received[r][solution[0]] = 1;
                 } else if(size == 2) {
-                    // 编码包：S-IDNC解码逻辑
+                    // 编码包：严格的 XOR 逻辑
                     int id1 = solution[0], id2 = solution[1];
                     if(received[r][id1] && !received[r][id2]) {
                         received[r][id2] = 1; // 解码出id2
                     } else if(!received[r][id1] && received[r][id2]) {
                         received[r][id1] = 1; // 解码出id1
-                    } else if(!received[r][id1] && !received[r][id2]) {
-                        // 两个包都没有，存储编码包（简化处理）
-                        received[r][id1] = 1;
-                        received[r][id2] = 1;
                     }
-                    // 如果两个包都已有，编码包无用
+                    // 若两者皆未知或皆已知，无法带来新增信息
                 }
             }
         }
