@@ -6,9 +6,8 @@ VectorSymbol createPackets(char **source, int K, int T) {
     packets.symbols = (Symbol**)malloc(sizeof(Symbol*) * K);
     packets.size = K;
     for(int i=0; i<K; i++) {
-        char* str = (char*)source[i];
         Symbol* sym = (Symbol*)malloc(sizeof(Symbol));
-        fillData(sym, str, T);
+        // 只设置元数据，不处理实际数据
         sym->esi.arr = (int*)malloc(sizeof(int));
         sym->esi.arr[0] = i;
         sym->esi.size = 1;
@@ -63,10 +62,10 @@ VectorSymbol encode(partition_result part_res, Symbol** Packets) {
  */
 bool isSFMAllzero(int** sfm, int row, int col) {
     for (int i = 0; i < row; i++) {
-        // 使用memcmp比较一整行
-        static const int zeros[32] = {0};  // 假设col最大为32
-        if (memcmp(sfm[i], zeros, col * sizeof(int)) != 0) {
-            return false;
+        for (int j = 0; j < col; j++) {
+            if (sfm[i][j] != 0) {
+                return false;
+            }
         }
     }
     return true;
@@ -75,10 +74,10 @@ bool isSFMAllzero(int** sfm, int row, int col) {
 
 bool findones(int** sfm, int row, int col) {
     for (int i = 0; i < row; i++) {
-        // 使用memcmp比较一整行
-        static const int zeros[32] = {0};  // 假设col最大为32
-        if (memcmp(sfm[i], zeros, col * sizeof(int)) != 0) {
-            return true;
+        for (int j = 0; j < col; j++) {
+            if (sfm[i][j] != 0) {
+                return true;
+            }
         }
     }
     return false;
@@ -173,6 +172,14 @@ VectorInt getClique(int** sfm, int rows, int cols, int limit) {
         }
 
         // Step 2: Select vk = argmax{wk}
+        if (LostPacket_size == 0) {
+            free(weights);
+            free(sfmAlter_sum);
+            free(P_bewant);
+            free(LostPacket);
+            break;  // 没有丢失的包，退出循环
+        }
+        
         int max_idx = 0;
         int max_weight = weights[0];
         for (int i = 0; i < LostPacket_size; i++) {
@@ -229,8 +236,17 @@ VectorInt getClique(int** sfm, int rows, int cols, int limit) {
 partition_result func_limit_partition(int** sfm, int rows, int cols, int limit) {
     partition_result res;
     
-    // 计算最大可能的解决方案数量：每个解最多包含2个顶点，所以最大数量为 cols/2 向上取整
-    int max_solutions = cols / 2 + 1;  
+    
+    // 输入验证
+    if (sfm == NULL || rows <= 0 || cols <= 0 || limit <= 0) {
+        res.solution = NULL;
+        res.solution_sizes = NULL;
+        res.solution_count = 0;
+        return res;
+    }
+    
+    // 计算最大可能的解决方案数量：保守估计，考虑最坏情况
+    int max_solutions = cols;  // 最坏情况下每个包都是单独的解  
     // 为解决方案数组分配内存
     int** Solution = (int**)malloc(max_solutions * sizeof(int*));
     int* Solution_sizes = (int*)malloc(max_solutions * sizeof(int));
@@ -285,6 +301,10 @@ partition_result func_limit_partition(int** sfm, int rows, int cols, int limit) 
             }
             
             Solution_count++;  // 增加解决方案计数
+        } else {
+            // printf("No clique found, breaking loop\n");
+            free(clique.arr);  // 释放临时团数组
+            break;  // 没有找到团，跳出循环
         }
         
         free(clique.arr);  // 释放临时团数组

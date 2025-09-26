@@ -26,6 +26,10 @@ Receiver receiveSymbol(Receiver receiver, const Symbol* sym) {
     int id1=-1, id2=-1; // 收到包的id
     if(n == 1) { //原始包
         id1 = sym->esi.arr[0];
+        // 检查ID是否在有效范围内
+        if(id1 < 0 || id1 >= receiver.symbol_map.size) {
+            return receiver;
+        }
         if(receiver.symbol_map.pktid[id1] == -1) { //没有这个包则存起来
             receiver.symbol_map.pktid[id1] = id1;
             receiver.symbol_map.symbols[id1] = sym;
@@ -35,6 +39,12 @@ Receiver receiveSymbol(Receiver receiver, const Symbol* sym) {
     } else if(n == 2) {
         id1 = sym->esi.arr[0];
         id2 = sym->esi.arr[1];
+        
+        // 检查ID是否在有效范围内
+        if(id1 < 0 || id1 >= receiver.symbol_map.size || id2 < 0 || id2 >= receiver.symbol_map.size) {
+            return receiver;
+        }
+        
         if(receiver.symbol_map.pktid[id1] == -1 && receiver.symbol_map.pktid[id2] == -1) {
             return receiver;
         }
@@ -43,23 +53,38 @@ Receiver receiveSymbol(Receiver receiver, const Symbol* sym) {
         }
         Symbol* decoded_sym = NULL;
         if(receiver.symbol_map.pktid[id1] == -1) {
+            // 检查symbols[id2]是否为NULL
+            if(receiver.symbol_map.symbols[id2] == NULL) {
+                return receiver;
+            }
             decoded_sym = xxor(sym, receiver.symbol_map.symbols[id2]);
+            if(decoded_sym == NULL) {
+                return receiver;
+            }
             decoded_sym->esi = newEsi(1);
             decoded_sym->esi.arr[0] = id1;
             decoded_sym->isCoded = 0;
             receiver.symbol_map.pktid[id1] = id1;
             receiver.symbol_map.symbols[id1] = decoded_sym;
             receiver.rev_status.arr[id1]=0;
+            receiver.pkt_recv++;
         } else if(receiver.symbol_map.pktid[id2] == -1) {
+            // 检查symbols[id1]是否为NULL
+            if(receiver.symbol_map.symbols[id1] == NULL) {
+                return receiver;
+            }
             decoded_sym = xxor(sym, receiver.symbol_map.symbols[id1]);
+            if(decoded_sym == NULL) {
+                return receiver;
+            }
             decoded_sym->esi = newEsi(1);
             decoded_sym->esi.arr[0] = id2;
             decoded_sym->isCoded = 0;
             receiver.symbol_map.pktid[id2] = id2;
             receiver.symbol_map.symbols[id2] = decoded_sym;
             receiver.rev_status.arr[id2]=0;
+            receiver.pkt_recv++;
         }
-        receiver.pkt_recv++;
     }
     return receiver;
 }

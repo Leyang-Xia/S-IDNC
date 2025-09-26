@@ -1,21 +1,18 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include "Symbol.h"
 #include "Sender.h"
 #include "Receiver.h"
 
-// 打印symbol内容
+// 简化的symbol信息打印（调试用，可选）
 void printSymbol(Symbol* symbol) {
     if(!symbol) return;
-    printf("esi: ");
-    int i,j;
-    for(i=0; i<symbol->esi.size; i++) {
-        printf("%d, ",symbol->esi.arr[i]);
+    printf("ESI[%d]: ", symbol->esi.size);
+    for(int i=0; i<symbol->esi.size; i++) {
+        printf("%d%s", symbol->esi.arr[i], (i<symbol->esi.size-1)?",":"");
     }
-    printf("nbytes=%d bytes, \"", symbol->nbytes);
-    for(j=0; j<symbol->nbytes/4; j++) {
-        printf("%d ",symbol->data[j]); // 0x33323130 转成10进制为858927408
-    }
-    printf("\"\n");
+    printf(" (coded=%d)\n", symbol->isCoded);
 }
 
 // 分配内存并初始化SFM矩阵
@@ -38,91 +35,66 @@ void formSFM(int** SFM, Receiver* receivers, int n) {
     }
 }
 
+// S-IDNC仿真参数（可直接修改）
+#define DEFAULT_K 32        // 源包数量
+#define DEFAULT_RECEIVERS 4 // 接收者数量  
+#define DEFAULT_LOSSRATE 0.8 // 丢包率
+
 int main() {
+    // 初始化随机数种子
+    srand(time(NULL));
+    
     int roundCount = 1;
-    int i,j,K,T;
-    double lossrate;
-    K = 32;
-    T = 4;
-    lossrate = 0.3;
+    int i,j;
+    
+    // 仿真参数
+    int K = DEFAULT_K;
+    int T = 0;  // 元数据模式
+    double lossrate = DEFAULT_LOSSRATE;
+    int num_rsver = DEFAULT_RECEIVERS;
+    
+    printf("Simulation parameters: K=%d, receivers=%d, loss_rate=%.2f\n", K, num_rsver, lossrate);
+    
     int** SFM; //全局变量
 
-    char** source = (char**)malloc(K * sizeof(char*));
-    for(i=0; i<K; i++) {
-        source[i] = (char*)malloc(T * sizeof(char));
-        for(j=0; j<T; j++) {
-            source[i][j] = (char)(j + '0');
-        }
-    }
+    // 创建源包（元数据模式）
+    VectorSymbol packets = createPackets(NULL, K, T);
 
-    // 初始化Sender结构体
-    VectorSymbol packets = createPackets((char**)source, K, T);
-    int pkt_num = packets.size;
-    printf("source symbol is :\n");
-    for(i=0; i<pkt_num; i++) {
-        Symbol* sym = packets.symbols[i];
-        printSymbol(sym);
-    }
-
-    //构造receiver
-    int num_rsver=4; //接收者个数
+    // 初始化接收者
     Receiver  *rcvers = (Receiver*) malloc(sizeof(Receiver) * num_rsver);
     for(i=0; i<num_rsver; i++) {
         rcvers[i] = initReceiver(K);
     }
 
-    //发送原始包，生成SFM矩阵
-    //初始时，sender发送原始包给每个接受者
-    for (i=0; i< K; i++) { //逐包发给每个接收者
+    // 初始传输阶段
+    int total_sent = K * num_rsver, total_received_initial = 0;
+    for (i=0; i< K; i++) {
         for(j=0; j<num_rsver; j++) {
             if (rand()/(RAND_MAX + 1.0) > lossrate) {
                 rcvers[j] = receiveSymbol(rcvers[j], packets.symbols[i]);
+                total_received_initial++;
             }
         }
     }
-    //打印收包状态
-    for(i=0; i<num_rsver; i++) {
-        //cout<<"receiver "<<r.id<<" receive pkts num is "<<r.pkt_recv<<endl;
-        printf("receiver %d receive pkts num is %d\n",i,rcvers[i].pkt_recv);
-    }
+    double actual_loss_rate = 1.0 - (double)total_received_initial / total_sent;
+    printf("Initial: %d/%d received (loss: %.2f)\n", total_received_initial, total_sent, actual_loss_rate);
 
-    // 打印receiver当前收到的原始包
-    for(j=0; j<num_rsver; j++) {
-        printf("receiver%d receive %d source pkts:\n", j, rcvers[j].pkt_recv);
-        for(i=0; i<rcvers[j].symbol_map.size; i++) {
-            if(rcvers[j].symbol_map.pktid[i] != -1) {
-                printSymbol(rcvers[j].symbol_map.symbols[i]);
-            }
-        }
-        printf("\n");
-    }
-
-    //初始化SFM, K为包个数
+    // 初始化状态反馈矩阵(SFM)
     SFM = initSFM(num_rsver, K);
     formSFM(SFM,rcvers, num_rsver);
-    printf("Round %d SFM matrix is:\n", roundCount);
-    for(i=0; i<num_rsver; i++) {
-        for(j=0; j<K; j++) {
-            printf("%d ", SFM[i][j]);
-        }
-        printf("\n");
-    }
+    // printf("Round %d started\n", roundCount);
 
     while(!isSFMAllzero(SFM, num_rsver, K)) {
-        //clique算法进行包配对
+        // S-IDNC编码：clique算法包配对
         int limit = 2;
         partition_result pairs = func_limit_partition(SFM, num_rsver, K, limit);
 
-        //生成编码包列表
+        // 生成编码包
         VectorSymbol symbolVec = encode(pairs, packets.symbols);
-        printf("print encoded pkts:\n");
-        for(i=0; i<symbolVec.size; i++) {
-            printSymbol(symbolVec.symbols[i]);
-        }
-        printf("\n");
+        // printf("Generated %d coded packets\n", symbolVec.size);
 
-        //发送编码包到接收方，接收方收包并解码
-        for (i=0; i< symbolVec.size; i++) { //逐包发给每个接收者
+        // 传输编码包
+        for (i=0; i< symbolVec.size; i++) {
             for(j=0; j<num_rsver; j++) {
                 if (rand()/(RAND_MAX + 1.0) > lossrate) {
                     rcvers[j] = receiveSymbol(rcvers[j], symbolVec.symbols[i]);
@@ -130,29 +102,11 @@ int main() {
             }
         }
 
-        // 打印receiver当前收到的原始包
-        for(j=0; j<num_rsver; j++) {
-            printf("receiver%d receive %d source pkts:\n", j, rcvers[j].pkt_recv);
-            for(i=0; i<rcvers[j].symbol_map.size; i++) {
-                if(rcvers[j].symbol_map.pktid[i] != -1) {
-                    printSymbol(rcvers[j].symbol_map.symbols[i]);
-                }
-            }
-            printf("\n");
-        }
-
         // 重新生成SFM矩阵
         formSFM(SFM,rcvers, num_rsver);
         roundCount++;
-        printf("Round %d SFM matrix is:\n", roundCount);
-        for(i=0; i<num_rsver; i++) {
-            for(j=0; j<K; j++) {
-                printf("%d ", SFM[i][j]);
-            }
-            printf("\n");
-        }
     }
 
-    printf("end");
+    printf("Simulation completed after %d rounds\n", roundCount-1);
     return 0;
 }

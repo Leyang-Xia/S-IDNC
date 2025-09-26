@@ -16,8 +16,7 @@ typedef struct {
 }Esi;
 
 typedef struct  {
-    int* data;
-    int nbytes;
+    int nbytes;  // 保留用于兼容性
     Esi esi;
     int isCoded;
 } Symbol;

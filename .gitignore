@@ -1,0 +1,39 @@
+# Editors
+.vscode/
+.idea/
+*.code-workspace
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Build outputs
+build/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local data
+*.tmp
+
+# Binaries
+simulation_fixed
+s_idnc_procedural
+
