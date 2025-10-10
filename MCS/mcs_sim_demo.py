@@ -31,10 +31,10 @@ DELTA_DOWN = 0.05
 HOLD_TIME_UP = 2
 HOLD_TIME_DOWN = 2
 EXPLORE_RATIO = 0.10
-NO_SAMPLE_DECAY = 0.90  # 本轮未尝试的 MCS 成功率轻度衰减
+NO_SAMPLE_DECAY = 0.9  # 本轮未尝试的 MCS 成功率轻度衰减
 N_MIN = 30          # 升档最小样本
-MAIN_TX_PER_ROUND = 9
-EXPLORE_TX_PER_ROUND = 1
+MAIN_TX_PER_ROUND = 500
+EXPLORE_TX_PER_ROUND = 55
 TOTAL_ROUNDS = 50
 RNG = np.random.default_rng(2025)
 
@@ -125,7 +125,7 @@ attempts = np.zeros((N_USERS, len(MCS_TABLE)), dtype=int)
 success = np.zeros((N_USERS, len(MCS_TABLE)), dtype=int)
 m_curr = 6
 hold_counter = 0
-bad_streak_counter = 0
+hold_counter_down = 0
 explore_offsets = deque([1, 2, -1, -2])
 round_history = []
 
@@ -211,12 +211,12 @@ for round_idx in range(1, TOTAL_ROUNDS + 1):
 
     m_prev = m_curr - 1
     if m_prev in MCS_TABLE and score_prev >= (1 + DELTA_DOWN) * score_curr:
-        bad_streak_counter += 1
-        if bad_streak_counter >= HOLD_TIME_DOWN:
+        hold_counter_down += 1
+        if hold_counter_down >= HOLD_TIME_DOWN:
             m_curr = max(m_prev, MCS_TABLE[0])
-            bad_streak_counter = 0
+            hold_counter_down = 0
     else:
-        bad_streak_counter = 0
+        hold_counter_down = 0
 
     round_history.append({
         "round": round_idx,
@@ -225,7 +225,7 @@ for round_idx in range(1, TOTAL_ROUNDS + 1):
         "score_next": float(score_next),
         "score_prev": float(score_prev),
         "hold_counter": int(hold_counter),
-        "bad_streak_counter": int(bad_streak_counter),
+        "hold_counter_down": int(hold_counter_down),
         "clusters": [cluster for cluster in active_clusters],
         "S_c_m_curr": [float(sc[m_curr]) for sc in S_c],
         "transmissions": list(transmissions),
@@ -240,7 +240,7 @@ for info in round_history[:50]:
         f"Score(m+1)={info['score_next']:.4f}, "
         f"Score(m-1)={info['score_prev']:.4f}, "
         f"hold={info['hold_counter']}, "
-        f"bad={info['bad_streak_counter']}, "
+        f"hold_down={info['hold_counter_down']}, "
         f"clusters={info['clusters']}, "
         f"S_c={['{:.4f}'.format(x) for x in info['S_c_m_curr']]}"
     )

@@ -55,10 +55,9 @@
   - `Δ_up`：升档收益增益阈值；`Δ_down`：降档收益增益阈值
   - `HOLD_TIME_UP`：升档连续满足轮数；`HOLD_TIME_DOWN`：降档连续满足轮数
   - `EXPLORE_RATIO`：探索占比
-  - `θ_outlier`（`OUTLIER_TH`）：离群判定阈值；`OUTLIER_L`：离群累积轮数
-  - `RESCUE_PERIOD`：保障发送周期
+-
   - `n_min`：升档最小样本需求
-
+  
 <!-- `θ_drop`：突发降档的滚动成功率阈值； -->
 - 调度与计划：
   - `K_total`：本轮总发送数；`K_explore`：探索发送数；`K_main`：主用发送数
@@ -74,11 +73,9 @@
     - \( s[i,m] \leftarrow \alpha \cdot s[i,m] + (1-\alpha)\cdot x \)
   - 时间基准：固定更新间隔 \( \Delta t = 100\text{ms} \)。
 
-#### 5.0 无样本衰减（No-sample decay）
-- 规则：若当轮 `attempt[i][m] == 0`，则对该统计执行轻度衰减：
+- 无样本衰减：若当轮 `attempt[i][m] == 0`，则对该统计执行轻度衰减：
   - \( s[i,m] \leftarrow \rho\cdot s[i,m] \)，其中 \(0<\rho<1\)
-- 含义：久未尝试的高阶 MCS 成功率会缓慢下降，避免“虚高”的历史统计长期影响选择，驱动后续再探测。
-- 默认：`ρ = NO_SAMPLE_DECAY = 0.85`。
+
 
 
 #### 5.1 用户PER单调修正
@@ -273,12 +270,6 @@ loop each round:
       bad_streak_counter ← 0
   else:
     bad_streak_counter ← 0
-
-  // F) 离群判定
-  for i in users:
-    if s[i][m_curr] < OUTLIER_TH: outlier_bad_streak[i] += 1
-    else: outlier_bad_streak[i] ← 0
-    if outlier_bad_streak[i] ≥ OUTLIER_L: mark_outlier(i)
 
 end loop
 ```
