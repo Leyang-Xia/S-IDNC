@@ -5,6 +5,7 @@
 #include <math.h>
 #include <time.h>
 
+/* 对簇进行插入排序 */
 static void InsertionSort(double *values, int n) {
     for (int i = 1; i < n; ++i) {
         double key = values[i];
@@ -80,7 +81,7 @@ static void PavNonIncreasing(const double *input, const double *weights, int n, 
         }
     }
     
-    // 正确的逆向填充：直接根据位置范围填充
+    // 逆向填充：直接根据位置范围填充
     for (int block = 0; block <= m; ++block) {
         double value = y[block];
         for (int pos = startPos[block]; pos <= endPos[block]; ++pos) {
@@ -201,7 +202,6 @@ static void SelectActiveClusters(const double *values, int n, const MCSConfig *c
     }
 
     /* 5) 生成簇（按 ζ 过滤），不足则取最大簇 */
-    int counts[MCS_MAX_CLUSTERS] = {0};
     if (useK == 2) {
         int sizes2[2] = { best2S, n - best2S };
         const int starts2[2] = { 0, best2S };
@@ -213,7 +213,6 @@ static void SelectActiveClusters(const double *values, int n, const MCSConfig *c
                 for (int i = 0; i < sizes2[c]; ++i) {
                     active->members[idx][i] = idxSorted[starts2[c] + i];
                 }
-                counts[idx] = sizes2[c];
                 idx++;
             }
         }
@@ -223,7 +222,6 @@ static void SelectActiveClusters(const double *values, int n, const MCSConfig *c
             for (int i = 0; i < sizes2[cmax]; ++i) {
                 active->members[0][i] = idxSorted[starts2[cmax] + i];
             }
-            counts[0] = sizes2[cmax];
             idx = 1;
         }
         active->clusters = idx;
@@ -241,7 +239,6 @@ static void SelectActiveClusters(const double *values, int n, const MCSConfig *c
                 for (int i = 0; i < sizes3[c]; ++i) {
                     active->members[idx][i] = idxSorted[starts3[c] + i];
                 }
-                counts[idx] = sizes3[c];
                 idx++;
             }
         }
@@ -256,7 +253,6 @@ static void SelectActiveClusters(const double *values, int n, const MCSConfig *c
             for (int i = 0; i < sizes3[cmax]; ++i) {
                 active->members[0][i] = idxSorted[starts3[cmax] + i];
             }
-            counts[0] = sizes3[cmax];
             idx = 1;
         }
         active->clusters = idx;
@@ -308,9 +304,18 @@ static double ComputeScore(const MCSState *state, const MCSConfig *cfg, const MC
         return -INFINITY;
     }
     double score = 0.0;
-    for (int c = 0; c < clusters->clusters; ++c) {
-        double succ = CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
-        score += state->rTable[m] * clusters->weights[c] * pow(succ, cfg->gamma);
+    double rate = state->rTable[m];
+    
+    if (cfg->gamma == 1.0) {
+        for (int c = 0; c < clusters->clusters; ++c) {
+            double succ = CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
+            score += rate * clusters->weights[c] * succ;
+        }
+    } else {
+        for (int c = 0; c < clusters->clusters; ++c) {
+            double succ = CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
+            score += rate * clusters->weights[c] * pow(succ, cfg->gamma);
+        }
     }
     return score;
 }
@@ -355,76 +360,58 @@ void McsInitState(MCSState *state, int userCount, int mcsLevels, const double *i
     }
 }
 
-int McsSelect(const MCSConfig *cfg, MCSState *state, const int *attemptsDelta, const double *successRatio, MCSDecisionInfo *info) {
+int McsSelect(const MCSConfig *cfg, MCSState *state, MCSDecisionInfo *info) {
     int users = state->userCount;
     int levels = state->mcsLevels;
     int prevMcs = state->mCurr;
-    for (int u = 0; u < users; ++u) {
-        for (int m = 0; m < levels; ++m) {
-            int idxDelta = u * levels + m;
-            int inc = attemptsDelta[idxDelta];
-            int idx = MCS_IDX(m, u);
-            if (inc > 0) {
-                state->attempts[idx] += inc;
-                double recent = successRatio[idxDelta];
-                state->successRate[idx] = cfg->alpha * state->successRate[idx] + (1.0 - cfg->alpha) * recent;
-            } else {
-                double per = 1.0 - state->successRate[idx];
-                per *= cfg->noSampleDecay;
-                if (per < 0.0) {
-                    per = 0.0;
-                }
-                if (per > 1.0) {
-                    per = 1.0;
-                }
-                state->successRate[idx] = 1.0 - per;
-            }
-        }
-        ApplyMonotonicUserSuccess(state, u);
-    }
 
+    /* 1. 基于当前 mCurr 锚定成功率进行聚类 */
     double anchor[MCS_MAX_USERS];
     for (int u = 0; u < users; ++u) {
         anchor[u] = state->successRate[MCS_IDX(state->mCurr, u)];
     }
 
+    /* 2. 聚类并计算评分 */
     MCSClusterSet clusters;
     SelectActiveClusters(anchor, users, cfg, &clusters);
     double scoreCurr = ComputeScore(state, cfg, &clusters, state->mCurr);
     double scoreUp = ComputeScore(state, cfg, &clusters, state->mCurr + 1);
     double scoreDown = ComputeScore(state, cfg, &clusters, state->mCurr - 1);
 
+    /* 3. 升降档决策 */
     int attemptsNext = 0;
     if (state->mCurr + 1 < levels) {
         for (int u = 0; u < users; ++u) {
             attemptsNext += state->attempts[MCS_IDX(state->mCurr + 1, u)];
         }
     }
+    
     if (state->mCurr + 1 < levels &&
         scoreUp >= (1.0 + cfg->deltaUp) * scoreCurr &&
         attemptsNext >= cfg->nMin) {
+        /* 升档条件满足 */
         state->holdCounterUp += 1;
+        state->holdCounterDown = 0;  /* 重置降档计数 */
         if (state->holdCounterUp >= cfg->holdTimeUp) {
             state->mCurr += 1;
             state->holdCounterUp = 0;
-            state->holdCounterDown = 0;
         }
-    } else {
-        state->holdCounterUp = 0;
-    }
-
-    if (state->mCurr - 1 >= 0 &&
-        scoreDown >= (1.0 + cfg->deltaDown) * scoreCurr) {
+    } else if (state->mCurr - 1 >= 0 &&
+               scoreDown >= (1.0 + cfg->deltaDown) * scoreCurr) {
+        /* 降档条件满足 */
         state->holdCounterDown += 1;
+        state->holdCounterUp = 0;  /* 重置升档计数 */
         if (state->holdCounterDown >= cfg->holdTimeDown) {
             state->mCurr -= 1;
             state->holdCounterDown = 0;
-            state->holdCounterUp = 0;
         }
     } else {
+        /* 升降档条件都不满足，重置两个计数器 */
+        state->holdCounterUp = 0;
         state->holdCounterDown = 0;
     }
 
+    /* 4. 填充决策信息（可选） */
     if (info) {
         info->prevMcs = prevMcs;
         info->mCurr = state->mCurr;
@@ -457,8 +444,7 @@ int McsGetExploreMcs(MCSState *state) {
         state->probeRow = 0;
         state->probeCol++;
         if (state->probeCol >= MCS_PROBE_COLS) {
-            /* 所有列用完后重新生成随机表 */
-            GenerateProbeTable(state->probeTable);
+            /* 所有列用完后重新从第一列开始 */
             state->probeCol = 0;
         }
     }
@@ -490,12 +476,6 @@ void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemp
             } else {
                 double per = 1.0 - state->successRate[idx];
                 per *= cfg->noSampleDecay;
-                if (per < 0.0) {
-                    per = 0.0;
-                }
-                if (per > 1.0) {
-                    per = 1.0;
-                }
                 state->successRate[idx] = 1.0 - per;
             }
         }

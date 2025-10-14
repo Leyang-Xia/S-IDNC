@@ -9,9 +9,9 @@
 - 初始化：`default_mcs = 6`
 
 ### 3. 主要思路
-- **聚类与稳健化**：基于每个用户在锚定档位`m_curr`的成功率 EWMA `s[i][m_curr]`，采用一维聚类方法将用户划分为簇，仅利用“活跃簇”的代表性成功率参与决策，从而避免少量表现差的用户影响整体选择。
+- **聚类与稳健化**：基于每个用户在锚定档位 $m_{\text{curr}}$ 的成功率 EWMA $s[i][m_{\text{curr}}]$，采用一维聚类方法将用户划分为簇，仅利用“活跃簇”的代表性成功率参与决策，从而避免少量表现差的用户影响整体选择。
 - **Minstrel 思路**：持续 EWMA 更新、吞吐评分、带约束的选择、防抖与周期性探索。
-- **无样本衰减**：对当轮未尝试的 MCS，将对应成功率进行轻度衰减。
+- **无样本衰减**：对当轮未尝试的 MCS，先将上一轮的 PER 估计 $p[i][m]$ 做温和衰减，随后再换算为成功率（即 $s[i][m]=1-p[i][m]$）。
 
 ### 4. 变量与符号
 - 索引与集合：
@@ -25,14 +25,14 @@
   - `round_succ_main`：主簇在当前轮的滚动成功率（用于突发降档）
 
 - 成功率估计：
-  - $s[i][m] \in [0,1]$：用户 `i` 在 `m` 的 EWMA 成功率
+  - $s[i][m] \in [0,1]$：用户 $i$ 在 $m$ 的 EWMA 成功率
   - `Q80(·)`：80% 分位数；`mean(·)`：平均值
   - $S_c[m]$：簇 `c` 在 `m` 的代表成功率（如 $0.7 \cdot Q80 + 0.3 \cdot \text{mean}$）
   - `samples_ok(m, n_min)`：档位 `m` 的样本量是否达到阈值 `n_min`
   - `sustained(m, k)`：候选条件是否已连续满足 `k` 轮
 
 - 评分与探索：
-  - `R[m]`：档位 `m` 的净吞吐
+  - $R[m]$：档位 $m$ 的净吞吐
   $\text{Score}[m] = R[m] \cdot \sum_{c\in C_{\text{active}}} w_c \cdot (S_c[m])^{\gamma}$：档位评分
   <!-- - $\text{UCB}[m] = \text{Score}[m] + c \cdot \sqrt{\frac{\ln(T)}{n_m}}$：探索上界评分；`c`：UCB 系数；`T`：累计探索步；`n_m`：档位 `m` 已探索次数 -->
   - $w_c$：簇权重，$w_c \propto |c|^{\beta} \cdot \text{priority}_c$，归一化后 $\sum w_c = 1$；`priority_c`：簇优先级（默认 1）
@@ -69,21 +69,22 @@
 
 ### 5. 统计与估计
 - EWMA 更新：
-  - 若近期窗口成功率 \(x=\frac{\text{success}}{\text{attempt}}\)：
-    - \( s[i,m] \leftarrow \alpha \cdot s[i,m] + (1-\alpha)\cdot x \)
-  - 时间基准：固定更新间隔 \( \Delta t = 100\text{ms} \)。
+  - 若近期窗口成功率 $x=\frac{\text{success}}{\text{attempt}}$：
+    - $ s[i,m] \leftarrow \alpha \cdot s[i,m] + (1-\alpha)\cdot x $
+  - 时间基准：固定更新间隔 $ \Delta t = 100\text{ms} $。
 
-- 无样本衰减：若当轮 `attempt[i][m] == 0`，则对该统计执行轻度衰减：
-  - \( s[i,m] \leftarrow \rho\cdot s[i,m] \)，其中 \(0<\rho<1\)
+- 无样本衰减：若当轮 $\text{attempt}[i][m] = 0$，则将上一轮 PER 估计 $p[i,m]=1-s[i,m]$ 做衰减：
+  - $ p[i,m] \leftarrow \rho \cdot p[i,m] $
+  - 更新成功率：$ s[i,m] \leftarrow 1 - p[i,m] $
 
 
 
 #### 5.1 用户PER单调修正
 - 目的：纠正样本稀疏/噪声导致的跨 MCS 非单调估计，使高阶成功率不高于低阶（PER 单调不下降）。
 
-- 方法：缺失数据处理+PAV(同单回归)：
-  - 缺失定义：`attempt[i][m] == 0` 
-  - 前缀最高填充：对低→高 MCS，若 `s[i,m]` 缺失，则用“前缀最高值”填入：`s_pref[m] = max_{k≤m, observed} s[i,k]`（无前缀则保持缺失）。
+- 方法：缺失数据处理 + PAV（同调回归）：
+  - 缺失定义：$\text{attempt}[i][m] = 0$
+  - 前缀最低填充：对低\rightarrow高 MCS，若 $s[i,m]$ 缺失，则用“前缀最低值”填入：$s^{\text{pref}}[m] = \min\limits_{k\le m,\ \text{observed}} s[i,k]$（无前缀则保持缺失）。
   - PAV：对序列 `s[i,m]` 加约束 `s[m] ≥ s[m+1]`，相邻违约块合并为均值，直至整体非增。
 
 ### 6. 聚类与活跃簇选择
@@ -91,15 +92,15 @@
 - 聚类方法：1D k-means++（K∈{2,3}，优先 2；当 N≥6 且存在明显中间簇时允许 3）。
   - K 选择：计算 K=2 与 K=3 的 轮廓系数，若 K=3 的相对改进 < 10% 则用 K=2。
 - 活跃簇选择：仅保留规模占比 ≥ ζ 的簇进入 `C_active`；其余视为离群簇（评分不考虑）。
- - 簇权重：\( w_c \propto |c|^{\beta}\cdot \text{priority}_c \)，归一化到 Σw=1。
+ - 簇权重：$ w_c \propto |c|^{\beta}\cdot \text{priority}_c $，归一化到 Σw=1。
 - 簇代表成功率：
-  - \( S_c[m] = 0.7 \cdot Q80(\{s[i,m]\}) + 0.3 \cdot \text{mean}(\cdot) \)
+  - $ S_c[m] = 0.7 \cdot Q80(\{s[i,m]\}) + 0.3 \cdot \text{mean}(\cdot) $
 
 ### 7. MCS 评分与选择
 
 #### 7.1 评分公式
 - 评分（活跃簇的期望吞吐）：
-  - \( \text{Score}[m] = R[m] \cdot \sum_{c\in C_{\text{active}}} w_c \cdot (S_c[m])^{\gamma} \)
+  - $ \text{Score}[m] = R[m] \cdot \sum_{c\in C_{\text{active}}} w_c \cdot (S_c[m])^{\gamma} $
 - 约束与对比：
   - 以 `Score[m]` 为决策依据，无需绝对阈值，升/降均与相邻档收益比较。
 - 防抖：
@@ -108,7 +109,7 @@
 #### 7.2 升降阶（MCS 上下切换）
 - 升阶（更高 MCS）
 - 触发条件（全部满足才升）：
-  - 收益比较：\( \text{Score}[m{+}1] \ge (1{+}\Delta_{up})\cdot \text{Score}[m] \)
+  - 收益比较：$ \text{Score}[m{+}1] \ge (1{+}\Delta_{up})\cdot \text{Score}[m] $
   - 样本门槛：`m+1` 样本量 ≥ `n_min`
   - 防抖：连续 `HOLD_TIME_UP` 轮满足条件（默认2）
   - 步长： 
@@ -117,7 +118,7 @@
 
 - 降阶（更低 MCS）
 - **收益对比降阶**（步长=1）：
-  - **条件**：若存在上一档 `m-1` 且 \( \text{Score}[m-1] \ge (1{+}\Delta_{down})\cdot \text{Score}[m] \)。
+  - **条件**：若存在上一档 $m-1$ 且 $ \text{Score}[m-1] \ge (1{+}\Delta_{down})\cdot \text{Score}[m] $。
   - **动作**：连续 `HOLD_TIME_DOWN` 轮满足条件后，降至 `m-1`（仅降 1 档，且不低于 `m_safe_low`），并进入冷静期。
   - **目的**：完全以收益对比判断，无需依赖绝对阈值，同时约束降档步长。
   
@@ -172,7 +173,7 @@ const EXPLORE_RATIO=0.10, RHO_NO_SAMPLE=0.85
 const n_min=30, default_mcs=6
 
 state:
-  s[i][m] ← 0.9
+  s[i][m] ← initial_success_profile(m)
   attempt[i][m], success[i][m] ← 0
   m_curr ← default_mcs
   hold_counter ← 0
@@ -200,19 +201,21 @@ loop each round:
       x ← recent_window_success(i,m)
       s[i][m] ← ALPHA*s[i][m] + (1-ALPHA)*x
     else:
-      s[i][m] ← RHO_NO_SAMPLE * s[i][m]
+      per ← 1 - s[i][m]
+      per ← clamp(RHO_NO_SAMPLE * per, 0, 1)
+      s[i][m] ← 1 - per
 
-  // D) 用户级单调修正（缺失处理：前缀最高 + PAV 非增）
+  // D) 用户级单调修正（缺失处理：前缀最低 + PAV 非增）
   for user i in users:
-    // 构造前缀最高填充序列 s_pref
+    // 构造前缀最低填充序列 s_pref
     s_pref[*] ← s[i][*]
-    max_seen ← -inf
+    min_seen ← +inf
     for m in MCS_TABLE (ascending):
       if attempt[i][m] > 0:
-        max_seen = max(max_seen, s[i][m])
+        min_seen = min(min_seen, s[i][m])
         s_pref[m] = s[i][m]
-      else if max_seen != -inf:
-        s_pref[m] = max_seen
+      else if min_seen != +inf:
+        s_pref[m] = min_seen
       // 若仍无前缀观测，可保留缺失或用保守先验（略）
 
     // 对 s_pref 做 PAV，得到 s_pav（非增）

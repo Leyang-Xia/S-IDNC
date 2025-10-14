@@ -119,11 +119,14 @@ static void RunDemo(void) {
             }
         }
 
-        /* D) 基于本轮统计数据选择下一轮的主用 MCS */
+        /* D) 更新统计数据 */
+        McsUpdateWithRound(&state, &cfg, attemptsDelta, successRatio);
+        
+        /* E) 基于更新后的状态选择下一轮的主用 MCS */
         MCSDecisionInfo info = {0};
         info.roundIndex = round;
         int prevMcs = mCurr;
-        int mcs = McsSelect(&cfg, &state, attemptsDelta, successRatio, &info);
+        int mcs = McsSelect(&cfg, &state, &info);
         printf("[Round %02d] mCurr=%d (prev=%d) Score(m)=%.4f, Score(m+1)=%.4f, Score(m-1)=%.4f, holdUp=%d, holdDown=%d, explore=%d\n",
                round,
                mcs,

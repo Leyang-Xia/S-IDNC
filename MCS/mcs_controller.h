@@ -11,7 +11,7 @@ extern "C" {
 #define MCS_MAX_LEVELS 12         /* 支持的最大 MCS 档位数 */
 #define MCS_MAX_CLUSTERS 3        /* 最大聚类簇数（本算法仅用 2/3） */
 #define MCS_MAX_ITER_KMEANS 20    /* k-means 迭代上限 */
-#define MCS_PROBE_COLS 16         /* 探索表的列数 */
+#define MCS_PROBE_COLS 8         /* 探索表的列数 */
 #define MCS_PROBE_ROWS 4          /* 探索表的行数（对应偏移 +1,+2,-1,-2） */
 
 /* 按 MCS 主序访问二维数据，提升缓存局部性 */
@@ -77,27 +77,33 @@ typedef struct {
 /* 初始化控制器状态 */
 void McsInitState(MCSState *state, int userCount, int mcsLevels, const double *initSuccess);
 
-/* 选择主用 MCS（基于统计数据更新状态并决策）
+/* 更新统计数据（EWMA + 单调性修正）
  * 参数:
- *   cfg: 算法配置参数
  *   state: 控制器状态（会被更新）
+ *   cfg: 算法配置参数
  *   attemptsDelta: 本轮各用户/MCS的尝试次数增量 (user_major, size = userCount * mcsLevels)
  *   successRatio: 本轮各用户/MCS的成功率 (user_major, size = userCount * mcsLevels)
+ * 说明: 应在每轮传输后、McsSelect 之前调用
+ */
+void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemptsDelta, const double *successRatio);
+
+/* 选择主用 MCS（纯决策，不更新统计数据）
+ * 参数:
+ *   cfg: 算法配置参数
+ *   state: 控制器状态（仅更新决策状态：mCurr, holdCounter）
  *   info: 可选的决策信息输出（可为 NULL）
  * 返回: 选定的主用 MCS
+ * 说明: 应在 McsUpdateWithRound 之后调用
  */
-int McsSelect(const MCSConfig *cfg, MCSState *state, const int *attemptsDelta, const double *successRatio, MCSDecisionInfo *info);
+int McsSelect(const MCSConfig *cfg, MCSState *state, MCSDecisionInfo *info);
 
 /* 获取下一个探索 MCS（基于当前 mCurr，按 round-robin 探索 +1,+2,-1,-2）
  * 参数:
  *   state: 控制器状态（探索表状态会被更新）
  * 返回: 探索用的 MCS 档位
- * 注意: 应在 McsSelect 之后调用，以基于最新的 mCurr 计算探索档位
+ * 说明: 应在每轮传输前调用，基于当前 mCurr 计算探索档位
  */
 int McsGetExploreMcs(MCSState *state);
-
-/* 仅更新统计数据，不做决策（用于纯数据收集场景）*/
-void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemptsDelta, const double *successRatio);
 
 #ifdef __cplusplus
 }

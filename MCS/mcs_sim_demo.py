@@ -1,6 +1,6 @@
 """基于 mcs_multicast.md 的方案，演示 8 个用户、12 个 MCS 档位的多轮仿真：
 - 每轮：主用 9 次发送 + 探索 1 次（round-robin遍历 {+1,+2,-1,-2}）
-- 用户级 PER 单调修正：缺失 → 前缀最高 → Isotonic(PAV)
+- 用户级 PER 单调修正：缺失 → 前缀最低 → Isotonic(PAV)
 - 聚类：1D k-means++（K=2 或 3，按轮廓系数筛选）
 - 升/降档：收益对比 + 防抖（步长 = 1）
 """
@@ -33,16 +33,16 @@ HOLD_TIME_DOWN = 2
 EXPLORE_RATIO = 0.10
 NO_SAMPLE_DECAY = 0.9  # 本轮未尝试的 MCS 成功率轻度衰减
 N_MIN = 30          # 升档最小样本
-MAIN_TX_PER_ROUND = 500
-EXPLORE_TX_PER_ROUND = 55
-TOTAL_ROUNDS = 50
+MAIN_TX_PER_ROUND = 90
+EXPLORE_TX_PER_ROUND = 10
+TOTAL_ROUNDS = 500
 RNG = np.random.default_rng(2025)
 
-# 真实 PER：基础值 (5~15%) + 线性递增 (2~4%/级)，并截顶到 90%
+# 真实 PER：基础值 (5~15%) + 线性递增 (3~5%/级)，并截顶到 90%
 true_per = np.zeros((N_USERS, len(MCS_TABLE)))
 for user in range(N_USERS):
     base = RNG.uniform(0.05, 0.15)
-    step = RNG.uniform(0.02, 0.035)
+    step = RNG.uniform(0.03, 0.05)
     true_per[user] = np.clip(base + step * MCS_TABLE, 0, 0.9)
 
 # 速率表：802.11ax HE80 (80MHz, NSS=2), GI=800ns, 12 档（Mbps）
@@ -55,20 +55,22 @@ R_TABLE = np.array([
 # ----------------------
 # 工具函数
 # ----------------------
-def prefix_max_fill(values, attempts):
-    """按 MCS 升序，用已有观测的最大成功率填充缺失项。"""
+def prefix_min_fill(values, attempts):
+    """按 MCS 升序，用已有观测的最低成功率填充缺失项。"""
     filled = values.copy()
-    max_seen = None
-    for idx, m in enumerate(MCS_TABLE):
+    min_seen = None
+    for idx, _ in enumerate(MCS_TABLE):
         if attempts[idx] > 0:
-            max_seen = filled[idx] if max_seen is None else max(max_seen, filled[idx])
-        elif max_seen is not None:
-            filled[idx] = max_seen
+            current = filled[idx]
+            min_seen = current if min_seen is None else min(min_seen, current)
+        elif min_seen is not None:
+            filled[idx] = min_seen
     return filled
 
+
 def monotonic_user_success(s_user, attempts_user):
-    """用户级 PER 单调修正：缺失→前缀最高→ PAV。"""
-    s_pref = prefix_max_fill(s_user, attempts_user)
+    """用户级 PER 单调修正：缺失→前缀最低→ PAV。"""
+    s_pref = prefix_min_fill(s_user, attempts_user)
     weights = np.clip(attempts_user, 1, None)
     iso = IsotonicRegression(increasing=False, out_of_bounds="clip")
     return iso.fit_transform(MCS_TABLE, s_pref, sample_weight=weights)
@@ -120,7 +122,8 @@ def calc_cluster_success(cluster, s_users):
 # ----------------------
 # 初始状态
 # ----------------------
-s = np.full((N_USERS, len(MCS_TABLE)), 0.9)
+s_base = np.linspace(0.95, 0.40, len(MCS_TABLE))
+s = np.tile(s_base, (N_USERS, 1))
 attempts = np.zeros((N_USERS, len(MCS_TABLE)), dtype=int)
 success = np.zeros((N_USERS, len(MCS_TABLE)), dtype=int)
 m_curr = 6
@@ -158,11 +161,14 @@ for round_idx in range(1, TOTAL_ROUNDS + 1):
         round_success, round_attempts,
         out=recent_rate, where=mask
     )
-    s = np.where(
+    s_candidate = ALPHA * s + (1 - ALPHA) * recent_rate
+    per_est = 1.0 - s
+    per_est = np.where(
         mask,
-        ALPHA * s + (1 - ALPHA) * recent_rate,
-        s * NO_SAMPLE_DECAY
+        1.0 - s_candidate,
+        np.clip(per_est * NO_SAMPLE_DECAY, 0.0, 1.0)
     )
+    s = 1.0 - per_est
 
     for u in range(N_USERS):
         s[u] = monotonic_user_success(s[u], attempts[u])
