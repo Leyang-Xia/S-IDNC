@@ -1,5 +1,6 @@
 #include "mcs_controller.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -188,7 +189,7 @@ static int32_t CalcClusterSuccessAt(const MCSState *state, const int *members, i
     int32_t q80 = PercentilePresorted(buffer, size, 800);  /* 0.80 * FIXED_SCALE */
     int32_t mean = (int32_t)(sum / size);
     /* 0.7 * q80 + 0.3 * mean */
-    return (7 * q80 + 3 * mean) / 10;
+    return FixedMul(700, q80) + FixedMul(300, mean);
 }
 
 /* 根据锚定成功率对用户聚类，并筛选出活跃簇 */
@@ -321,7 +322,7 @@ static void SelectActiveClusters(const int32_t *values, int n, const MCSConfig *
     for (int c = 0; c < active->clusters; ++c) {
         /* w = size^beta，beta 为定点数 */
         int32_t sizeFixed = active->sizes[c] * FIXED_SCALE;
-        int32_t w = FixedPow(sizeFixed, cfg->beta);
+        int32_t w = cfg->beta == 1000 ? active->sizes[c] : FixedPow(sizeFixed, cfg->beta);  
         active->weights[c] = w;
         weightSum += w;
     }
@@ -334,25 +335,16 @@ static void SelectActiveClusters(const int32_t *values, int n, const MCSConfig *
     #undef SSE
 }
 
-/* 生成随机探索偏移表 */
-static void GenerateProbeTable(int table[MCS_PROBE_COLS][MCS_PROBE_ROWS]) {
-    static int initialized = 0;
-    if (!initialized) {
-        srand((unsigned int)time(NULL));
-        initialized = 1;
-    }
-    
-    for (int col = 0; col < MCS_PROBE_COLS; ++col) {
-        int offsets[MCS_PROBE_ROWS] = {1, 2, -1, -2};
-        for (int i = MCS_PROBE_ROWS - 1; i > 0; --i) {
-            int j = rand() % (i + 1);
-            int tmp = offsets[i];
-            offsets[i] = offsets[j];
-            offsets[j] = tmp;
-        }
-        for (int row = 0; row < MCS_PROBE_ROWS; ++row) {
-            table[col][row] = offsets[row];
-        }
+/* 动态计算升档防抖阈值 */
+static int GetHoldTimeUp(int targetMcs) {
+    if (targetMcs <= 6) {
+        return 2;
+    } else if (targetMcs <= 8) {
+        return 3;
+    } else if (targetMcs <= 10) {
+        return 4;
+    } else {
+        return 5;
     }
 }
 
@@ -394,24 +386,25 @@ void McsInitState(MCSState *state, int userCount, int mcsLevels, const int32_t *
     state->mCurr = 6;
     state->holdCounterUp = 0;
     state->holdCounterDown = 0;
+    state->probeState = MCS_PROBE_NORMAL;
+    state->probeTarget = -1;
     
-    GenerateProbeTable(state->probeTable);
-    state->probeCol = 0;
-    state->probeRow = 0;
+    MCS_LOG_INIT("Initialize: users=%d, levels=%d, initMCS=%d\n", 
+                 userCount, mcsLevels, state->mCurr);
     
     int32_t fallback[MCS_MAX_LEVELS];
     if (!initSuccess) {
-        /* 从 0.95 到 0.40 的线性下降 */
-        const int32_t start = 950;   /* 0.95 * FIXED_SCALE */
-        const int32_t end = 400;     /* 0.40 * FIXED_SCALE */
+        /* 从 0.90 到 0.30 的线性下降 */
+        const int32_t start = 900;   /* 0.90 * FIXED_SCALE */
+        const int32_t end = 300;     /* 0.40 * FIXED_SCALE */
         const int32_t step = (mcsLevels > 1) ? (start - end) / (mcsLevels - 1) : 0;
+
         for (int m = 0; m < mcsLevels; ++m) {
             int32_t value = start - step * m;
-            if (value < 50) value = 50;        /* 0.05 */
-            if (value > 990) value = 990;      /* 0.99 */
             fallback[m] = value;
         }
     }
+    
     for (int u = 0; u < userCount; ++u) {
         for (int m = 0; m < mcsLevels; ++m) {
             int idx = MCS_IDX(m, u);
@@ -422,109 +415,159 @@ void McsInitState(MCSState *state, int userCount, int mcsLevels, const int32_t *
     }
 }
 
-int McsSelect(const MCSConfig *cfg, MCSState *state, MCSDecisionInfo *info) {
+int McsSelect(const MCSConfig *cfg, MCSState *state) {
     int users = state->userCount;
     int levels = state->mcsLevels;
     int prevMcs = state->mCurr;
+    int mReturn = state->mCurr;  /* 默认返回当前 MCS */
 
-    /* 1. 基于当前 mCurr 锚定成功率进行聚类 */
+    /*  基于当前 mCurr 的成功率进行聚类 */
     int32_t anchor[MCS_MAX_USERS];
     for (int u = 0; u < users; ++u) {
         anchor[u] = state->successRate[MCS_IDX(state->mCurr, u)];
     }
 
-    /* 2. 聚类并计算评分 */
+    /* 聚类并计算评分 */
     MCSClusterSet clusters;
     SelectActiveClusters(anchor, users, cfg, &clusters);
     int64_t scoreCurr = ComputeScore(state, cfg, &clusters, state->mCurr);
     int64_t scoreUp = ComputeScore(state, cfg, &clusters, state->mCurr + 1);
     int64_t scoreDown = ComputeScore(state, cfg, &clusters, state->mCurr - 1);
 
-    /* 3. 升降档决策 */
-    int attemptsNext = 0;
-    if (state->mCurr + 1 < levels) {
-        for (int u = 0; u < users; ++u) {
-            attemptsNext += state->attempts[MCS_IDX(state->mCurr + 1, u)];
+    /* 聚类信息 */
+    MCS_LOG_CLUSTER("mCurr=%d, clusters=%d, scores: curr=%lld, up=%lld, down=%lld\n",
+                    state->mCurr, clusters.clusters,
+                    (long long)scoreCurr, (long long)scoreUp, (long long)scoreDown);
+    for (int c = 0; c < clusters.clusters; ++c) {
+#if MCS_DEBUG
+        int32_t cSucc = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr);
+        MCS_LOG_CLUSTER("  Cluster[%d]: size=%d, weight=%.3f, succ@%d=%.3f, members=[",
+                        c, clusters.sizes[c], clusters.weights[c]/1000.0, 
+                        state->mCurr, cSucc/1000.0);
+        for (int i = 0; i < clusters.sizes[c]; ++i) {
+            MCS_LOG("%d%s", clusters.members[c][i], i < clusters.sizes[c]-1 ? "," : "");
         }
-    }
-    
-    /* scoreUp >= (1 + deltaUp) * scoreCurr */
-    /* scoreUp >= scoreCurr + deltaUp * scoreCurr */
-    /* scoreUp >= scoreCurr * (FIXED_ONE + deltaUp) / FIXED_ONE */
-    int64_t thresholdUp = (scoreCurr * (FIXED_ONE + cfg->deltaUp)) / FIXED_ONE;
-    int64_t thresholdDown = (scoreCurr * (FIXED_ONE + cfg->deltaDown)) / FIXED_ONE;
-    
-    if (state->mCurr + 1 < levels &&
-        scoreUp >= thresholdUp &&
-        attemptsNext >= cfg->nMin) {
-        state->holdCounterUp += 1;
-        state->holdCounterDown = 0;
-        if (state->holdCounterUp >= cfg->holdTimeUp) {
-            state->mCurr += 1;
-            state->holdCounterUp = 0;
-        }
-    } else if (state->mCurr - 1 >= 0 &&
-               scoreDown >= thresholdDown) {
-        state->holdCounterDown += 1;
-        state->holdCounterUp = 0;
-        if (state->holdCounterDown >= cfg->holdTimeDown) {
-            state->mCurr -= 1;
-            state->holdCounterDown = 0;
-        }
-    } else {
-        state->holdCounterUp = 0;
-        state->holdCounterDown = 0;
+        MCS_LOG("]\n");
+#else
+        (void)c;  /* Suppress unused variable warning */
+#endif
     }
 
-    /* 4. 填充决策信息 */
-    if (info) {
-        info->prevMcs = prevMcs;
-        info->mCurr = state->mCurr;
-        info->scoreCurr = scoreCurr;
-        info->scoreUp = scoreUp;
-        info->scoreDown = scoreDown;
-        info->holdCounterUp = state->holdCounterUp;
-        info->holdCounterDown = state->holdCounterDown;
-        info->clusterCount = clusters.clusters;
-        for (int c = 0; c < clusters.clusters; ++c) {
-            info->clusterSizes[c] = clusters.sizes[c];
-            info->clusterWeights[c] = clusters.weights[c];
-            info->clusterSuccess[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr);
-            for (int i = 0; i < clusters.sizes[c]; ++i) {
-                info->clusterMembers[c][i] = clusters.members[c][i];
+    /* 探测-验证状态机 */
+    if (state->probeState == MCS_PROBE_UP) {
+        /* 验证升档探测结果：使用探测前的聚类（基于 mCurr），但用更新后的数据 */
+        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget);
+        MCS_LOG_PROBE("Verify up-shift: %d->%d, scoreTarget=%lld, scoreCurr=%lld, %s\n",
+               prevMcs,
+               state->probeTarget, (long long)scoreTarget, (long long)scoreCurr,
+               scoreTarget >= scoreCurr ? "PASS" : "FAIL");
+        if (scoreTarget >= scoreCurr) {
+            /* 升档成功 */
+            state->mCurr = state->probeTarget;
+            MCS_LOG_PROBE("Up-shift SUCCESS: %d -> %d\n", prevMcs, state->mCurr);        
+        } else {
+            MCS_LOG_PROBE("Up-shift FAILED, rollback to %d\n", state->mCurr);
+        }
+        /* 无论成功与否，重置状态 */
+        state->holdCounterUp = 0;
+        state->holdCounterDown = 0;
+        state->probeState = MCS_PROBE_NORMAL;
+        state->probeTarget = -1;
+        mReturn = state->mCurr;
+        
+    } else if (state->probeState == MCS_PROBE_DOWN) {
+        /* 验证降档探测结果：使用探测前的聚类（基于 mCurr），但用更新后的数据 */
+        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget);
+        MCS_LOG_PROBE("Verify down-shift: %d->%d, scoreTarget=%lld, scoreCurr=%lld, %s\n",
+               prevMcs,
+               state->probeTarget, (long long)scoreTarget, (long long)scoreCurr,
+               scoreTarget >= scoreCurr ? "PASS" : "FAIL");
+        if (scoreTarget >= scoreCurr) {
+            /* 降档成功 */
+            state->mCurr = state->probeTarget;
+            MCS_LOG_PROBE("Down-shift SUCCESS: %d -> %d\n", prevMcs, state->mCurr);
+        } else {
+            MCS_LOG_PROBE("Down-shift FAILED, keep %d\n", state->mCurr);
+        }
+        /* 无论成功与否，重置状态 */
+        state->holdCounterDown = 0;
+        state->holdCounterUp = 0;
+        state->probeState = MCS_PROBE_NORMAL;
+        state->probeTarget = -1;
+        mReturn = state->mCurr;
+        
+    } else {
+        /* NORMAL 状态：评估是否需要进入探测 */
+        
+        /* 升档判定 */
+        int mNext = state->mCurr + 1;
+        if (mNext < levels) {
+            MCS_LOG_SELECT("Up-shift check: mNext=%d, scoreUp=%lld, scoreCurr=%lld, condition: %s\n",
+                          mNext, (long long)scoreUp, (long long)scoreCurr,
+                          scoreUp >= scoreCurr ? "met" : "not met");
+            
+            if (scoreUp >= scoreCurr) {
+                state->holdCounterUp += 1;
+                
+                int holdTimeUp = GetHoldTimeUp(mNext);
+                MCS_LOG_SELECT("Up-shift counter: %d/%d\n",
+                              state->holdCounterUp, holdTimeUp);
+                
+                if (state->holdCounterUp >= holdTimeUp) {
+                    /* 进入升档探测状态 */
+                    MCS_LOG_PROBE("Trigger up-shift probe: %d -> %d\n", state->mCurr, mNext);
+                    state->probeState = MCS_PROBE_UP;
+                    state->probeTarget = mNext;
+                    mReturn = mNext;  /* 下一轮发送探测帧 */
+                }
+            } else {
+                state->holdCounterUp = 0;
+            }
+        }
+        
+        /* 降档判定 */
+        int mPrev = state->mCurr - 1;
+        if (mPrev >= 0) {
+            MCS_LOG_SELECT("Down-shift check: mPrev=%d, scoreDown=%lld, scoreCurr=%lld, condition: %s\n",
+                          mPrev, (long long)scoreDown, (long long)scoreCurr,
+                          scoreDown >= scoreCurr ? "met" : "not met");
+            
+            if (scoreDown >= scoreCurr) {
+                state->holdCounterDown += 1;
+                
+                MCS_LOG_SELECT("Down-shift counter: %d/%d\n",
+                              state->holdCounterDown, cfg->holdTimeDown);
+                
+                if (state->holdCounterDown >= cfg->holdTimeDown) {
+                    /* 进入降档探测状态 */
+                    MCS_LOG_PROBE("Trigger down-shift probe: %d -> %d\n", state->mCurr, mPrev);
+                    state->probeState = MCS_PROBE_DOWN;
+                    state->probeTarget = mPrev;
+                    mReturn = mPrev;  /* 下一轮发送探测帧 */
+                }
+            } else {
+                state->holdCounterDown = 0;
             }
         }
     }
 
-    return state->mCurr;
+    /* 决策信息 */
+    MCS_LOG_SELECT("Decision: prevMcs=%d, mCurr=%d, mReturn=%d, holdUp=%d, holdDown=%d\n",
+                   prevMcs, state->mCurr, mReturn,
+                   state->holdCounterUp, state->holdCounterDown);
+    MCS_LOG_SELECT("  Scores: curr=%lld, up=%lld, down=%lld\n",
+                   (long long)scoreCurr, (long long)scoreUp, (long long)scoreDown);
+
+    return mReturn;
 }
 
-int McsGetExploreMcs(MCSState *state) {
-    int offset = state->probeTable[state->probeCol][state->probeRow];
-    
-    state->probeRow++;
-    if (state->probeRow >= MCS_PROBE_ROWS) {
-        state->probeRow = 0;
-        state->probeCol++;
-        if (state->probeCol >= MCS_PROBE_COLS) {
-            state->probeCol = 0;
-        }
-    }
-    
-    int mExplore = state->mCurr + offset;
-    if (mExplore < 0) {
-        mExplore = 0;
-    }
-    if (mExplore >= state->mcsLevels) {
-        mExplore = state->mcsLevels - 1;
-    }
-    
-    return mExplore;
-}
 
 void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemptsDelta, const int32_t *successRatio) {
     int users = state->userCount;
     int levels = state->mcsLevels;
+    
+    MCS_LOG_UPDATE("Update statistics (EWMA + monotonic correction)\n");
+    
     for (int u = 0; u < users; ++u) {
         for (int m = 0; m < levels; ++m) {
             int idxDelta = u * levels + m;
@@ -533,14 +576,30 @@ void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemp
             if (inc > 0) {
                 state->attempts[idx] += inc;
                 int32_t recent = successRatio[idxDelta];
+#if MCS_DEBUG
+                int32_t oldRate = state->successRate[idx];
+#endif
                 /* EWMA: old * alpha + new * (1 - alpha) */
                 state->successRate[idx] = FixedMul(cfg->alpha, state->successRate[idx]) + 
                                           FixedMul(FIXED_ONE - cfg->alpha, recent);
+                MCS_LOG_UPDATE("  User%d MCS%d: sampled, old=%.3f, recent=%.3f, new=%.3f\n",
+                              u, m, oldRate/1000.0, recent/1000.0, state->successRate[idx]/1000.0);
             } else {
-                /* 衰减：per = 1 - successRate; per *= decay; successRate = 1 - per */
+                /* 未采样档位：PER 衰减，成功率上升，但限制上限 */
+#if MCS_DEBUG
+                int32_t oldSucc = state->successRate[idx];
+#endif
                 int32_t per = FIXED_ONE - state->successRate[idx];
                 per = FixedMul(per, cfg->noSampleDecay);
                 state->successRate[idx] = FIXED_ONE - per;
+                
+                /* 限制未采样档位的成功率上限为 0.95 */
+                if (state->successRate[idx] > 950) {
+                    state->successRate[idx] = 950;
+                }
+                
+                MCS_LOG_UPDATE("  User%d MCS%d: un-sampled, decay PER, succ %.3f -> %.3f\n",
+                              u, m, oldSucc/1000.0, state->successRate[idx]/1000.0);
             }
         }
         ApplyMonotonicUserSuccess(state, u);

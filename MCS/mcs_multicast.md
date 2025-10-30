@@ -28,7 +28,6 @@
   - $s[i][m] \in [0,1]$：用户 $i$ 在 $m$ 的 EWMA 成功率
   - `Q80(·)`：80% 分位数；`mean(·)`：平均值
   - $S_c[m]$：簇 `c` 在 `m` 的代表成功率（如 $0.7 \cdot Q80 + 0.3 \cdot \text{mean}$）
-  - `samples_ok(m, n_min)`：档位 `m` 的样本量是否达到阈值 `n_min`
   - `sustained(m, k)`：候选条件是否已连续满足 `k` 轮
 
 - 评分与探索：
@@ -55,8 +54,6 @@
   - `Δ_up`：升档收益增益阈值；`Δ_down`：降档收益增益阈值
   - `HOLD_TIME_UP`：升档连续满足轮数；`HOLD_TIME_DOWN`：降档连续满足轮数
   - `EXPLORE_RATIO`：探索占比
--
-  - `n_min`：升档最小样本需求
   
 <!-- `θ_drop`：突发降档的滚动成功率阈值； -->
 - 调度与计划：
@@ -87,7 +84,9 @@
   - 前缀最低填充：对低\rightarrow高 MCS，若 $s[i,m]$ 缺失，则用“前缀最低值”填入：$s^{\text{pref}}[m] = \min\limits_{k\le m,\ \text{observed}} s[i,k]$（无前缀则保持缺失）。
   - PAV：对序列 `s[i,m]` 加约束 `s[m] ≥ s[m+1]`，相邻违约块合并为均值，直至整体非增。
 
-### 6. 聚类与活跃簇选择
+### 6. MCS 评分
+
+#### 6.1. 聚类与活跃簇选择
 - 输入：一维样本向量 `s[i][m_curr]`
 - 聚类方法：1D k-means++（K∈{2,3}，优先 2；当 N≥6 且存在明显中间簇时允许 3）。
   - K 选择：计算 K=2 与 K=3 的 轮廓系数，若 K=3 的相对改进 < 10% 则用 K=2。
@@ -96,194 +95,48 @@
 - 簇代表成功率：
   - $ S_c[m] = 0.7 \cdot Q80(\{s[i,m]\}) + 0.3 \cdot \text{mean}(\cdot) $
 
-### 7. MCS 评分与选择
-
-#### 7.1 评分公式
+#### 6.2 评分公式
 - 评分（活跃簇的期望吞吐）：
   - $ \text{Score}[m] = R[m] \cdot \sum_{c\in C_{\text{active}}} w_c \cdot (S_c[m])^{\gamma} $
-- 约束与对比：
-  - 以 `Score[m]` 为决策依据，无需绝对阈值，升/降均与相邻档收益比较。
-- 防抖：
-  - 升档需连续 `HOLD_TIME_UP` 轮判定为真；降档需连续 `HOLD_TIME_DOWN` 轮。
 
-#### 7.2 升降阶（MCS 上下切换）
+### 7 升降阶与探测机制
+
+#### 7.1 升降阶逻辑
 - 升阶（更高 MCS）
-- 触发条件（全部满足才升）：
-  - 收益比较：$ \text{Score}[m{+}1] \ge (1{+}\Delta_{up})\cdot \text{Score}[m] $
-  - 样本门槛：`m+1` 样本量 ≥ `n_min`
-  - 防抖：连续 `HOLD_TIME_UP` 轮满足条件（默认2）
-  - 步长： 
-    - 默认 +1；
-  - 若 `m+1` 统计陈旧（Δt 大或 `attempt` 少），先在探索中刷新再判断?
+- 触发条件：
+  - 收益比较：若存在 $m-1$ 且 $ \text{Score}[m{+}1] \ge (1{+}\Delta_{up})\cdot \text{Score}[m] $
+  - 防抖：连续 `HOLD_TIME_UP` 轮满足条件，发送 `m+1`阶探针
 
 - 降阶（更低 MCS）
-- **收益对比降阶**（步长=1）：
-  - **条件**：若存在上一档 $m-1$ 且 $ \text{Score}[m-1] \ge (1{+}\Delta_{down})\cdot \text{Score}[m] $。
-  - **动作**：连续 `HOLD_TIME_DOWN` 轮满足条件后，降至 `m-1`（仅降 1 档，且不低于 `m_safe_low`），并进入冷静期。
-  - **目的**：完全以收益对比判断，无需依赖绝对阈值，同时约束降档步长。
-  
-  <!--
-  - **突发保护**：
-    - **统计依据**：`round_succ_main` = 当轮主簇在主用档位的瞬时成功率
-      - 计算：仅统计用 `m_curr` 发送且覆盖主簇成员的组播，`round_succ_main = successes/attempts`
-      - 平滑：EWMA 或 3 轮窗口均值，避免单次抖动
-    - **触发条件**：`round_succ_main < θ_drop`或连续丢 ACK 超阈值
-    - **降档策略**：
-      - 降 1 档（如 MCS 7→6）
-    - **目的**：快速响应信道恶化，避免持续的高丢包
-  -->
-  
+- 触发条件：
+  - 收益比较：若存在 $m-1$ 且 $ \text{Score}[m-1] \ge (1{+}\Delta_{down})\cdot \text{Score}[m] $。
+  - 防抖：连续 `HOLD_TIME_DOWN` 轮满足条件后，发送 `m-1` 阶探针。
 
 
-<!-- - 探索与切换的关系
-  - 对样本不足的更高档位，提高探索权重，直至达到 `n_min` 样本阈值 -->
+#### 7.2. 条件触发式探测-验证机制
+- **探测触发**：仅在升/降阶条件连续满足达到防抖阈值时触发，不采用固定比例探测。
+- **探测对象**：仅探测目标档位（`m_curr+1` 或 `m_curr-1`），不同时探测多个档位。
+- **探测-验证流程**：
+  1. **条件判定**：当升/降阶条件连续满足达到防抖阈值时，进入探测状态
+  2. **发送探测帧**：下一轮整轮使用目标 MCS（`m_curr±1`）发送
+  3. **更新统计**：根据探测结果更新目标 MCS 的统计数据（EWMA + 单调修正）
+  4. **再次验证**：重新计算评分并判断升/降阶条件：
+     - 仍满足 → 正式切换到目标 MCS，防抖计数清零
+     - 不满足 → 回退到原 MCS，防抖计数清零
 
-
-### 8. 探索机制
-- 发送份额：主用 MCS 占 90%，探索占 10%（与Minstrel一致）。
-- 探索对象与调度：在候选 {`m_curr+1`, `m_curr+2`, `m_curr-1`, `m_curr-2`} 中按 round-robin 轮转选择可用档位。
-
-#### Minstrel方案参考
-- 启动时预生成一张随机排列表，每列是MCS_TABLE的随机序列。
-- 运行时按照列顺序扫描，用完一列换下一列。
-- 跳过成功率大于95%的MCS
-- linux的实现中还会显示成功率小于1%的MCS最多探测两次
-
-<!-- ### 9. 离群者与保障
-- 用户级离群：若对主用 MCS 连续 L 窗 `s[i][m_curr] < θ`，标记离群（不参与聚类）。
-- 保障策略：每 `RESCUE_PERIOD` 轮插入一次低 MCS 的保底发送，尝试恢复；若连续 T 次无 ACK，视为离开并暂时忽略。 -->
-
-### 9. 参数默认值
+### 8. 参数默认值
 - **EWMA**：`ALPHA=0.25`
 - **聚类**：`ZETA=0.2`（簇规模下限），`BETA=1.0`（线性按人数加权）
-- **评分**：`GAMMA=1.2`（偏好稳定），`R[m]` 净吞吐
+- **评分**：`GAMMA=1.0`（线性评分），`R[m]` 净吞吐
 - **收益阈值**：`Δ_up=0.05`，`Δ_down=0.05`
-- **防抖**：`HOLD_TIME_UP=2`，`HOLD_TIME_DOWN=2`
-- **探索**：`EXPLORE_RATIO=0.10`
-- **样本**：`n_min=30`
-- **无样本衰减**：`NO_SAMPLE_DECAY=0.85`
+- **防抖（动态）**：
+  - **降阶**：`HOLD_TIME_DOWN=2`（固定）
+  - **升阶**：动态调整
+    - MCS ≤ 6：`HOLD_TIME_UP=2`
+    - MCS 7-8：`HOLD_TIME_UP=3`
+    - MCS 9-10：`HOLD_TIME_UP=4`
+    - MCS ≥ 11：`HOLD_TIME_UP=5`
+- **无样本衰减**：`NO_SAMPLE_DECAY=0.90`
 - **固定设定**：`BW=80MHz`，`NSS=2`，`default_mcs=6`，`m_safe_low=2`，`MCS_TABLE=0..11`。
-
-### 11. 伪代码
-```pseudo
-const ALPHA=0.25, ZETA=0.2, BETA=1.0
-const GAMMA=1.2, Δ_up=0.05, Δ_down=0.05
-const HOLD_TIME_UP=2, HOLD_TIME_DOWN=2
-const EXPLORE_RATIO=0.10, RHO_NO_SAMPLE=0.85
-const n_min=30, default_mcs=6
-
-state:
-  s[i][m] ← initial_success_profile(m)
-  attempt[i][m], success[i][m] ← 0
-  m_curr ← default_mcs
-  hold_counter ← 0
-  bad_streak_counter ← 0
-  explore_offsets ← deque([+1, +2, -1, -2])
-
-loop each round:
-  // A) 发送计划（主用+探索）
-  plan ← []
-  append MAIN_TX_PER_ROUND of {mcs: m_curr} to plan
-  offset ← pop_left_then_push_back(explore_offsets)
-  m_explore ← clip(m_curr + offset, min(MCS_TABLE), max(MCS_TABLE))
-  append EXPLORE_TX_PER_ROUND of {mcs: m_explore} to plan
-
-  // B) 执行并收集 ACK（组播到所有用户）
-  for tx in plan:
-    for user i in users:
-      attempt[i][tx.mcs] += 1
-      recv ← ack_received(i, tx) ? 1 : 0
-      success[i][tx.mcs] += recv
-
-  // C) EWMA + 无样本衰减
-  for each (i,m):
-    if attempts_in_this_round[i][m] > 0:
-      x ← recent_window_success(i,m)
-      s[i][m] ← ALPHA*s[i][m] + (1-ALPHA)*x
-    else:
-      per ← 1 - s[i][m]
-      per ← clamp(RHO_NO_SAMPLE * per, 0, 1)
-      s[i][m] ← 1 - per
-
-  // D) 用户级单调修正（缺失处理：前缀最低 + PAV 非增）
-  for user i in users:
-    // 构造前缀最低填充序列 s_pref
-    s_pref[*] ← s[i][*]
-    min_seen ← +inf
-    for m in MCS_TABLE (ascending):
-      if attempt[i][m] > 0:
-        min_seen = min(min_seen, s[i][m])
-        s_pref[m] = s[i][m]
-      else if min_seen != +inf:
-        s_pref[m] = min_seen
-      // 若仍无前缀观测，可保留缺失或用保守先验（略）
-
-    // 对 s_pref 做 PAV，得到 s_pav（非增）
-    s[i][*] ← PAV_nonincreasing(s_pref[*])
-
-  // B) 聚类与活跃簇
-  // 1D k-means++ 聚类（K∈{2,3}）
-  K_clusters ← choose_K_via_sse_and_silhouette(users, m_curr)
-  clusters ← kmeanspp_1d(users, m_curr, K_clusters, max_iters=20)
-  C_active ← { c in clusters | size(c)/N ≥ ZETA }
-  normalize weights: w_c ∝ (size(c))^BETA
-
-  // F) 簇代表成功率
-  for c in C_active:
-    for m in MCS_TABLE:
-      vals ← { s[i][m] | i ∈ c, has_samples(i,m) }
-      if vals empty: S_c[m] ← prior(m)             // e.g., decaying 0.6
-      else: S_c[m] ← 0.7*quantile(vals,0.80)+0.3*mean(vals)
-
-  // G) 评分（当前与相邻档）
-  c* ← argmax_c size(c) in C_active
-  curr_score ← R[m_curr] * Σ_{c∈C_active} (w_c * (S_c[m_curr])^GAMMA)
-  m_next ← m_curr + 1
-  if m_next ∈ MCS_TABLE:
-    score_next ← R[m_next] * Σ_{c∈C_active} (w_c * (S_c[m_next])^GAMMA)
-  else:
-    score_next ← -inf
-  m_prev ← m_curr - 1
-  if m_prev ∈ MCS_TABLE:
-    score_prev ← R[m_prev] * Σ_{c∈C_active} (w_c * (S_c[m_prev])^GAMMA)
-  else:
-    score_prev ← -inf
-
-  // H) 升降阶决策与防抖
-  // 升阶判定（步长=1）
-  if m_next ∈ MCS_TABLE
-       and score_next ≥ (1+Δ_up) * curr_score
-       and samples_ok(m_next, n_min):
-    if hold_counter ≥ HOLD_TIME_UP:
-      m_curr ← m_next
-      hold_counter ← 0
-    else:
-      hold_counter += 1
-  else:
-    hold_counter ← 0
-
-  // 降阶判定（步长=1）
-  if m_prev ∈ MCS_TABLE and score_prev ≠ -inf:
-    if score_prev ≥ (1+Δ_down) * curr_score:
-      bad_streak_counter += 1
-      if bad_streak_counter ≥ HOLD_TIME_DOWN:
-        m_curr ← max(m_prev, m_safe_low)
-        bad_streak_counter ← 0
-    else:
-      bad_streak_counter ← 0
-  else:
-    bad_streak_counter ← 0
-
-end loop
-```
-
-### 12. 图示（HE80, NSS=2, GI=800ns）
-<p align="center">
-  <img src="./MCS_TABLE(NSS=2).png" alt="MCS Table (NSS=2, HE80, GI=800ns)" width="85%" />
-</p>
-
-<p align="center">
-  <img src="./mcs_sim_demo_results.png" alt="Simulation Results" width="85%" />
-</p>
 
 
