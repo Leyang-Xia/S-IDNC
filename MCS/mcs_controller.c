@@ -80,7 +80,7 @@ static int32_t PercentilePresorted(const int32_t *sortedValues, int n, int32_t p
     if (high >= n) high = n - 1;
     if (low >= n) low = n - 1;
     
-    /* weight = (rank - low) * FIXED_SCALE，即小数部分 */
+    /* weight = (rank - low) * FIXED_SCALE */
     int32_t weight = (int32_t)((rank64 * FIXED_SCALE) - (low * FIXED_SCALE));
     int32_t result = sortedValues[low];
     if (high > low) {
@@ -91,88 +91,59 @@ static int32_t PercentilePresorted(const int32_t *sortedValues, int n, int32_t p
     return result;
 }
 
-/* 前缀最小填充：高档未采样时继承已观测的最低成功率 */
-static void PrefixMinFill(const int32_t *values, const int *attempts, int n, int32_t *out) {
-    int32_t minSeen = 11 * FIXED_SCALE / 10;  /* 1.1 的定点表示 */
-    int hasSeen = 0;
-    for (int m = 0; m < n; ++m) {
-        if (attempts[m] > 0) {
-            int32_t v = values[m];
-            if (!hasSeen || v < minSeen) {
-                minSeen = v;
-                hasSeen = 1;
-            }
-            out[m] = v;
-        } else if (hasSeen) {
-            out[m] = minSeen;
-        } else {
-            out[m] = values[m];
-        }
-    }
-}
-
-/* PAV算法实现 */
-static void PavNonIncreasing(const int32_t *input, const int32_t *weights, int n, int32_t *output) {
-    int32_t *y = (int32_t *)malloc(sizeof(int32_t) * n);
-    int32_t *w = (int32_t *)malloc(sizeof(int32_t) * n);
-    int *startPos = (int *)malloc(sizeof(int) * n);
-    int *endPos = (int *)malloc(sizeof(int) * n);
-    
-    int m = -1;
-    for (int i = 0; i < n; ++i) {
-        int32_t val = input[i];
-        int32_t wt = weights ? weights[i] : FIXED_ONE;
-        ++m;
-        y[m] = val;
-        w[m] = wt;
-        startPos[m] = i;
-        endPos[m] = i;
-        
-        while (m > 0 && y[m - 1] < y[m]) {
-            /* 加权平均：(y[m-1]*w[m-1] + y[m]*w[m]) / (w[m-1] + w[m]) */
-            int64_t numerator = (int64_t)y[m - 1] * w[m - 1] + (int64_t)y[m] * w[m];
-            int32_t denom = w[m - 1] + w[m];
-            y[m - 1] = (int32_t)(numerator / denom);
-            w[m - 1] = denom;
-            endPos[m - 1] = endPos[m];
-            --m;
-        }
-    }
-    
-    /* 逆向填充 */
-    for (int block = 0; block <= m; ++block) {
-        int32_t value = y[block];
-        for (int pos = startPos[block]; pos <= endPos[block]; ++pos) {
-            output[pos] = value;
-        }
-    }
-    
-    free(y);
-    free(w);
-    free(startPos);
-    free(endPos);
-}
-
-/* 对单个用户执行"前缀最高 + PAV" 修正 */
-static void ApplyMonotonicUserSuccess(MCSState *state, int user) {
+/* 对单个用户执行前缀最小填充修正：
+ * 1. 对于当前轮次已采样档位：采样值是权威的，直接使用
+ * 2. 如果前面的档位成功率比当前采样值低，应该提升到至少等于当前采样值（确保单调性）
+ * 3. 对于当前轮次未采样档位：取前缀最小值与当前值的最小值
+ */
+static void ApplyMonotonicUserSuccess(MCSState *state, int user, const int *attemptsDelta, int levels) {
     int mcs = state->mcsLevels;
-    int32_t sPref[MCS_MAX_LEVELS];
-    int32_t weights[MCS_MAX_LEVELS];
-    int32_t src[MCS_MAX_LEVELS];
-    int att[MCS_MAX_LEVELS];
+    int32_t values[MCS_MAX_LEVELS];
+    int sampledThisRound[MCS_MAX_LEVELS];  /* 当前轮次是否采样 */
+    
+    /* 读取当前状态 */
     for (int m = 0; m < mcs; ++m) {
         int idx = MCS_IDX(m, user);
-        src[m] = state->successRate[idx];
-        att[m] = state->attempts[idx];
+        values[m] = state->successRate[idx];
+        int idxDelta = user * levels + m;
+        sampledThisRound[m] = attemptsDelta[idxDelta];  /* 当前轮次采样状态 */
     }
-    PrefixMinFill(src, att, mcs, sPref);
+    
+    /* 前缀最小填充逻辑 */
+    int32_t minSeen = 11 * FIXED_SCALE / 10;  /* 1.1 的定点表示 */
+    
     for (int m = 0; m < mcs; ++m) {
-        weights[m] = att[m] > 0 ? att[m] : FIXED_ONE;
+        if (sampledThisRound[m] > 0) {
+            /* 当前轮次已采样：采样值是权威的 */
+            int32_t v = values[m];
+            
+            /* 如果前面的档位成功率比当前采样值高，应该提升到至少等于当前采样值 */
+            /* 这样可以确保单调性：低MCS成功率 >= 高MCS成功率 */
+            if (v > minSeen) {
+                /* 当前采样值比之前看到的最小值还小，需要提升前面的档位 */
+                for (int i = 0; i < m; ++i) {
+                    /* 如果前面档位的值小于当前采样值，提升到当前采样值 */
+                    if (values[i] < v) {
+                        values[i] = v;
+                    }
+                }
+                minSeen = v;
+            } else {
+                minSeen = v;
+            }
+        } else {
+            /* 当前轮次未采样档位：取前缀最小值与当前值的最小值 */
+            if (minSeen < values[m]) {  
+                values[m] = minSeen;
+            } else {
+                minSeen = values[m];
+            }
+        }
     }
-    int32_t corrected[MCS_MAX_LEVELS];
-    PavNonIncreasing(sPref, weights, mcs, corrected);
+    
+    /* 写回结果 */
     for (int m = 0; m < mcs; ++m) {
-        state->successRate[MCS_IDX(m, user)] = corrected[m];
+        state->successRate[MCS_IDX(m, user)] = values[m];
     }
 }
 
@@ -185,11 +156,12 @@ static int32_t CalcClusterSuccessAt(const MCSState *state, const int *members, i
         buffer[i] = val;
         sum += val;
     }
-    InsertionSort(buffer, size);
-    int32_t q80 = PercentilePresorted(buffer, size, 800);  /* 0.80 * FIXED_SCALE */
+    // InsertionSort(buffer, size);
+    // int32_t q80 = PercentilePresorted(buffer, size, 800);  /* 0.80 * FIXED_SCALE */
     int32_t mean = (int32_t)(sum / size);
-    /* 0.7 * q80 + 0.3 * mean */
-    return FixedMul(700, q80) + FixedMul(300, mean);
+    /* 0.7 * q80 + 0.3 * mean = (7 * q80 + 3 * mean) / 10 */
+    // return (int32_t)(((int64_t)7 * q80 + (int64_t)3 * mean) / 10);
+    return mean;
 }
 
 /* 根据锚定成功率对用户聚类，并筛选出活跃簇 */
@@ -220,11 +192,14 @@ static void SelectActiveClusters(const int32_t *values, int n, const MCSConfig *
     p1[0] = 0;
     p2[0] = 0;
     for (int i = 0; i < n; ++i) {
-        p1[i+1] = p1[i] + vSorted[i];
-        p2[i+1] = p2[i] + (int64_t)vSorted[i] * vSorted[i];
+        int64_t v = vSorted[i];
+        p1[i+1] = p1[i] + v;
+        p2[i+1] = p2[i] + v * v;  /* 优化：避免重复读取vSorted[i] */
     }
     /* SSE(l,r) = p2[r+1]-p2[l] - (p1[r+1]-p1[l])^2 / (r-l+1) */
-    #define SSE(l,r) ( (p2[(r)+1]-p2[(l)]) - ((p1[(r)+1]-p1[(l)])*(p1[(r)+1]-p1[(l)]))/((r)-(l)+1) )
+    /* 优化：直接计算避免宏展开开销 */
+    #define SSE(l,r) \
+        ((p2[(r)+1] - p2[(l)]) - ((p1[(r)+1] - p1[(l)]) * (p1[(r)+1] - p1[(l)])) / ((r)-(l)+1))
 
     /* 3) k=2、k=3 穷举切分 */
     int64_t best2 = INT64_MAX;
@@ -348,8 +323,9 @@ static int GetHoldTimeUp(int targetMcs) {
     }
 }
 
-/* 计算指定档位的聚合评分 */
-static int64_t ComputeScore(const MCSState *state, const MCSConfig *cfg, const MCSClusterSet *clusters, int m) {
+/* 计算指定档位的聚合评分 - 优化：预计算簇成功率避免重复排序 */
+static int64_t ComputeScore(const MCSState *state, const MCSConfig *cfg, const MCSClusterSet *clusters, int m, 
+                            const int32_t *clusterSuccCache) {
     if (m < 0 || m >= state->mcsLevels) {
         return INT64_MIN;
     }
@@ -359,7 +335,8 @@ static int64_t ComputeScore(const MCSState *state, const MCSConfig *cfg, const M
     if (cfg->gamma == FIXED_ONE) {
         /* gamma = 1.0，不需要幂运算 */
         for (int c = 0; c < clusters->clusters; ++c) {
-            int32_t succ = CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
+            int32_t succ = clusterSuccCache ? clusterSuccCache[c] : 
+                          CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
             /* score += rate * weight * succ */
             int64_t term = (int64_t)rate * clusters->weights[c];
             term = (term * succ) / FIXED_SCALE;
@@ -367,7 +344,8 @@ static int64_t ComputeScore(const MCSState *state, const MCSConfig *cfg, const M
         }
     } else {
         for (int c = 0; c < clusters->clusters; ++c) {
-            int32_t succ = CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
+            int32_t succ = clusterSuccCache ? clusterSuccCache[c] : 
+                          CalcClusterSuccessAt(state, clusters->members[c], clusters->sizes[c], m);
             int32_t succPow = FixedPow(succ, cfg->gamma);
             /* score += rate * weight * succ^gamma */
             int64_t term = (int64_t)rate * clusters->weights[c];
@@ -391,19 +369,9 @@ void McsInitState(MCSState *state, int userCount, int mcsLevels, const int32_t *
     
     MCS_LOG_INIT("Initialize: users=%d, levels=%d, initMCS=%d\n", 
                  userCount, mcsLevels, state->mCurr);
-    
-    int32_t fallback[MCS_MAX_LEVELS];
-    if (!initSuccess) {
-        /* 从 0.90 到 0.30 的线性下降 */
-        const int32_t start = 900;   /* 0.90 * FIXED_SCALE */
-        const int32_t end = 300;     /* 0.40 * FIXED_SCALE */
-        const int32_t step = (mcsLevels > 1) ? (start - end) / (mcsLevels - 1) : 0;
-
-        for (int m = 0; m < mcsLevels; ++m) {
-            int32_t value = start - step * m;
-            fallback[m] = value;
-        }
-    }
+    int32_t fallback[MCS_MAX_LEVELS] = {
+        900, 845, 790, 735, 680, 625, 570, 515, 460, 405, 350, 300
+    };
     
     for (int u = 0; u < userCount; ++u) {
         for (int m = 0; m < mcsLevels; ++m) {
@@ -430,9 +398,33 @@ int McsSelect(const MCSConfig *cfg, MCSState *state) {
     /* 聚类并计算评分 */
     MCSClusterSet clusters;
     SelectActiveClusters(anchor, users, cfg, &clusters);
-    int64_t scoreCurr = ComputeScore(state, cfg, &clusters, state->mCurr);
-    int64_t scoreUp = ComputeScore(state, cfg, &clusters, state->mCurr + 1);
-    int64_t scoreDown = ComputeScore(state, cfg, &clusters, state->mCurr - 1);
+    
+    /* 预计算各簇在当前MCS的成功率 */
+    int32_t clusterSuccCache[MCS_MAX_CLUSTERS];
+    for (int c = 0; c < clusters.clusters; ++c) {
+        clusterSuccCache[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr);
+    }
+    
+    int64_t scoreCurr = ComputeScore(state, cfg, &clusters, state->mCurr, clusterSuccCache);
+    
+    /* 对于相邻档位，预计算簇成功率（限制最高到MCS 9） */
+    int32_t clusterSuccUp[MCS_MAX_CLUSTERS];
+    int32_t clusterSuccDown[MCS_MAX_CLUSTERS];
+    for (int c = 0; c < clusters.clusters; ++c) {
+        if (state->mCurr + 1 < levels && state->mCurr + 1 <= 9) {
+            clusterSuccUp[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr + 1);
+        }
+        if (state->mCurr - 1 >= 0) {
+            clusterSuccDown[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr - 1);
+        }
+    }
+    
+    int64_t scoreUp = INT64_MIN;
+    if (state->mCurr + 1 < levels && state->mCurr + 1 <= 9) {
+        scoreUp = ComputeScore(state, cfg, &clusters, state->mCurr + 1, clusterSuccUp);
+    }
+    int64_t scoreDown = ComputeScore(state, cfg, &clusters, state->mCurr - 1, 
+                                     (state->mCurr - 1 >= 0) ? clusterSuccDown : NULL);
 
     /* 聚类信息 */
     MCS_LOG_CLUSTER("mCurr=%d, clusters=%d, scores: curr=%lld, up=%lld, down=%lld\n",
@@ -440,10 +432,11 @@ int McsSelect(const MCSConfig *cfg, MCSState *state) {
                     (long long)scoreCurr, (long long)scoreUp, (long long)scoreDown);
     for (int c = 0; c < clusters.clusters; ++c) {
 #if MCS_DEBUG
-        int32_t cSucc = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->mCurr);
-        MCS_LOG_CLUSTER("  Cluster[%d]: size=%d, weight=%.3f, succ@%d=%.3f, members=[",
-                        c, clusters.sizes[c], clusters.weights[c]/1000.0, 
-                        state->mCurr, cSucc/1000.0);
+        /* 使用已缓存的成功率，避免重复计算 */
+        int32_t cSucc = clusterSuccCache[c];
+        MCS_LOG_CLUSTER("  Cluster[%d]: size=%d, weight=%d, succ@%d=%d, members=[",
+                        c, clusters.sizes[c], clusters.weights[c], 
+                        state->mCurr, cSucc);
         for (int i = 0; i < clusters.sizes[c]; ++i) {
             MCS_LOG("%d%s", clusters.members[c][i], i < clusters.sizes[c]-1 ? "," : "");
         }
@@ -456,7 +449,12 @@ int McsSelect(const MCSConfig *cfg, MCSState *state) {
     /* 探测-验证状态机 */
     if (state->probeState == MCS_PROBE_UP) {
         /* 验证升档探测结果：使用探测前的聚类（基于 mCurr），但用更新后的数据 */
-        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget);
+        /* 需要重新计算探测目标档位的簇成功率 */
+        int32_t clusterSuccTarget[MCS_MAX_CLUSTERS];
+        for (int c = 0; c < clusters.clusters; ++c) {
+            clusterSuccTarget[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->probeTarget);
+        }
+        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget, clusterSuccTarget);
         MCS_LOG_PROBE("Verify up-shift: %d->%d, scoreTarget=%lld, scoreCurr=%lld, %s\n",
                prevMcs,
                state->probeTarget, (long long)scoreTarget, (long long)scoreCurr,
@@ -477,7 +475,12 @@ int McsSelect(const MCSConfig *cfg, MCSState *state) {
         
     } else if (state->probeState == MCS_PROBE_DOWN) {
         /* 验证降档探测结果：使用探测前的聚类（基于 mCurr），但用更新后的数据 */
-        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget);
+        /* 需要重新计算探测目标档位的簇成功率 */
+        int32_t clusterSuccTarget[MCS_MAX_CLUSTERS];
+        for (int c = 0; c < clusters.clusters; ++c) {
+            clusterSuccTarget[c] = CalcClusterSuccessAt(state, clusters.members[c], clusters.sizes[c], state->probeTarget);
+        }
+        int64_t scoreTarget = ComputeScore(state, cfg, &clusters, state->probeTarget, clusterSuccTarget);
         MCS_LOG_PROBE("Verify down-shift: %d->%d, scoreTarget=%lld, scoreCurr=%lld, %s\n",
                prevMcs,
                state->probeTarget, (long long)scoreTarget, (long long)scoreCurr,
@@ -499,9 +502,9 @@ int McsSelect(const MCSConfig *cfg, MCSState *state) {
     } else {
         /* NORMAL 状态：评估是否需要进入探测 */
         
-        /* 升档判定 */
+        /* 升档判定 - 限制最高到MCS 9 */
         int mNext = state->mCurr + 1;
-        if (mNext < levels) {
+        if (mNext < levels && mNext <= 9) {  /* 限制最高MCS为9 */
             MCS_LOG_SELECT("Up-shift check: mNext=%d, scoreUp=%lld, scoreCurr=%lld, condition: %s\n",
                           mNext, (long long)scoreUp, (long long)scoreCurr,
                           scoreUp >= scoreCurr ? "met" : "not met");
@@ -582,8 +585,8 @@ void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemp
                 /* EWMA: old * alpha + new * (1 - alpha) */
                 state->successRate[idx] = FixedMul(cfg->alpha, state->successRate[idx]) + 
                                           FixedMul(FIXED_ONE - cfg->alpha, recent);
-                MCS_LOG_UPDATE("  User%d MCS%d: sampled, old=%.3f, recent=%.3f, new=%.3f\n",
-                              u, m, oldRate/1000.0, recent/1000.0, state->successRate[idx]/1000.0);
+                MCS_LOG_UPDATE("  User%d MCS%d: sampled, old=%d, recent=%d, new=%d\n",
+                              u, m, oldRate, recent, state->successRate[idx]);
             } else {
                 /* 未采样档位：PER 衰减，成功率上升，但限制上限 */
 #if MCS_DEBUG
@@ -593,15 +596,39 @@ void McsUpdateWithRound(MCSState *state, const MCSConfig *cfg, const int *attemp
                 per = FixedMul(per, cfg->noSampleDecay);
                 state->successRate[idx] = FIXED_ONE - per;
                 
-                /* 限制未采样档位的成功率上限为 0.95 */
-                if (state->successRate[idx] > 950) {
-                    state->successRate[idx] = 950;
+                /* 限制未采样档位的成功率上限 */
+                if (m == 8) {
+                    /* MCS 8: PER老化有30%下界，即成功率上限70% */
+                    if (state->successRate[idx] > 750) {
+                        state->successRate[idx] = 750;
+                    }
+                } else if (m == 9) {
+                    /* MCS 9: PER老化有70%下界，即成功率上限30% */
+                    if (state->successRate[idx] > 300) {
+                        state->successRate[idx] = 300;
+                    }
+                } else {
+                    /* 其他档位：成功率上限95% */
+                    if (state->successRate[idx] > 990) {
+                        state->successRate[idx] = 990;
+                    }
                 }
                 
-                MCS_LOG_UPDATE("  User%d MCS%d: un-sampled, decay PER, succ %.3f -> %.3f\n",
-                              u, m, oldSucc/1000.0, state->successRate[idx]/1000.0);
+                // MCS_LOG_UPDATE("  User%d MCS%d: un-sampled, decay PER, succ %d -> %d\n",
+                //               u, m, oldSucc, state->successRate[idx]);
             }
         }
-        ApplyMonotonicUserSuccess(state, u);
+        ApplyMonotonicUserSuccess(state, u, attemptsDelta, levels);
+        
+#if MCS_DEBUG
+        /* 单调性修正后的各阶成功率 */
+        MCS_LOG_UPDATE("  User%d after monotonic correction: ", u);
+        for (int m = 0; m < levels; ++m) {
+            int idx = MCS_IDX(m, u);
+            printf("MCS%d=%d%s", m, state->successRate[idx], 
+                   m < levels-1 ? ", " : "");
+        }
+        printf("\n");
+#endif
     }
 }

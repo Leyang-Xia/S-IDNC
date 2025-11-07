@@ -110,6 +110,19 @@ static void RunDemo(void) {
             }
         }
 
+        // INSERT_YOUR_CODE
+        printf("attemptsDelta: ");
+        for (int idx = 0; idx < state.userCount * state.mcsLevels; ++idx) {
+            printf("%d ", attemptsDelta[idx]);
+        }
+        printf("\n");
+
+        // INSERT_YOUR_CODE
+        printf("successRatio: ");
+        for (int idx = 0; idx < state.userCount * state.mcsLevels; ++idx) {
+            printf("%.2f ", (double)successRatio[idx] / FIXED_SCALE);
+        }
+        printf("\n");
         /* D) 更新统计数据 */
         McsUpdateWithRound(&state, &cfg, attemptsDelta, successRatio);
         

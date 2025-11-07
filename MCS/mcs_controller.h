@@ -33,7 +33,6 @@ extern "C" {
 #define MCS_MAX_USERS 8          /* 支持的最大用户数 */
 #define MCS_MAX_LEVELS 12         /* 支持的最大 MCS 档位数 */
 #define MCS_MAX_CLUSTERS 3        /* 最大聚类簇数（本算法仅用 2/3） */
-#define MCS_MAX_ITER_KMEANS 20    /* k-means 迭代上限 */
 
     /* 定点数缩放因子：用于表示 [0.0, 1.0] 范围的成功率、速率等参数 */
 #define FIXED_SCALE 1000         /* 1000 表示 1.0，即保留 3 位小数精度 */
