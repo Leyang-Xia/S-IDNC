@@ -2,7 +2,7 @@
 .vscode/
 .idea/
 *.code-workspace
-
+.cursor/
 # Python
 __pycache__/
 *.pyc

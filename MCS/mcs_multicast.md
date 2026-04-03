@@ -139,4 +139,24 @@
 - **无样本衰减**：`NO_SAMPLE_DECAY=0.90`
 - **固定设定**：`BW=80MHz`，`NSS=2`，`default_mcs=6`，`m_safe_low=2`，`MCS_TABLE=0..11`。
 
+```mermaid
+flowchart TD
+  A[McsInitState()\n初始化控制器状态与各用户/档位成功率初值] --> B{每一轮传输结束}
 
+  B --> C[McsUpdateWithRound()\n融合本轮观测并对未采样档位做老化更新]
+  C --> C1[ApplyMonotonicUserSuccess()\n对单用户成功率曲线做单调性修正（低MCS更稳）]
+  C1 --> D[McsSelect()\n基于聚类+评分并用探测-验证状态机决定本轮MCS]
+
+  D --> E[SelectActiveClusters()\n按锚点成功率做1D聚类并筛选活跃簇]
+  E --> F[CalcClusterSuccessAt()\n计算各簇在当前档位的代表成功率]
+  F --> G[AssignClusterWeights()\n按簇规模分配并归一化簇权重（成功率过滤已注释）]
+  G --> H[ComputeScore()\n计算候选档位评分用于升/降档判断]
+
+  H --> I{probeState?}
+  I -->|NORMAL| J[升/降档判定\n满足条件则进入探测并返回探测档位]
+  I -->|PROBE_UP/PROBE_DOWN| K[探测反馈收集\n等待所有用户目标档位反馈]
+  K --> L[验证切换\n比较scoreTarget与scoreCurr决定更新mCurr或回滚]
+
+  J --> M[返回 mReturn\n本轮使用主用或探测MCS]
+  L --> M
+  M --> B
